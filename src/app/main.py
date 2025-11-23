@@ -18,7 +18,7 @@ def main() -> None:
               f"{comp.node1} {comp.node2}")
 
     target_gain_db = 40.0
-    freq_hz = 1000.0
+    freq_hz = 100000000.0
 
     # 2) Ideal optimization (fast, purely analytical)
     ideal_circuit, ideal_gain_db = optimize_gain_for_non_inverting_stage(

@@ -16,8 +16,6 @@ import tempfile
 from pathlib import Path
 import re
 import platform
-import shutil
-
 
 
 # Decide which executable name to use.
@@ -27,35 +25,28 @@ if platform.system() == "Windows":
 else:
     NGSPICE_EXECUTABLE = "ngspice"
 
-# Path to TL072 model in the project
-PROJECT_ROOT = Path(__file__).resolve().parents[2]  # .../AI_circuit_designer
-MODEL_DIR = PROJECT_ROOT / "src" / "models"
-TL072_MODEL = MODEL_DIR / "TL072.301"
-
 
 class SpiceError(RuntimeError):
     """Custom exception for SPICE-related errors."""
     pass
 
+
 def run_spice_ac_gain(netlist: str) -> Dict[str, float]:
     """
-    Run ngspice on the given netlist (AC analysis with .print vm(Vout) vm(Vin))
-    and return a dict with the gain in dB and the raw magnitudes.
+    Run ngspice on the given netlist (AC analysis with
+    `.print ac vm(Vout) vm(Vin)`) and return a dict with the
+    gain in dB and the raw magnitudes.
+
+    Assumes:
+    - The AC source at Vin has magnitude 1 V (as in build_non_inverting_ac_netlist),
+      so |Vout| = linear gain.
     """
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir_path = Path(tmpdir)
         netlist_path = tmpdir_path / "circuit_ac.cir"
         log_path = tmpdir_path / "ngspice.log"
 
-        # Copy TL072 model into temp dir so .include "TL072.301" works
-        try:
-            shutil.copy(TL072_MODEL, tmpdir_path / "TL072.301")
-        except FileNotFoundError as exc:
-            raise SpiceError(
-                f"TL072 SPICE model not found at {TL072_MODEL}. "
-                "Make sure TL072.301 is in src/models."
-            ) from exc
-
+        # 1) Write the netlist
         netlist_path.write_text(netlist, encoding="utf-8")
 
         # 2) Call ngspice in batch mode
@@ -72,7 +63,7 @@ def run_spice_ac_gain(netlist: str) -> Dict[str, float]:
                 "installed and available on your PATH."
             ) from exc
 
-        # Always try to read the log, even on error
+        # 3) Read the log (if any), even on error
         log_text = ""
         if log_path.exists():
             log_text = log_path.read_text(encoding="utf-8", errors="ignore")
@@ -95,7 +86,13 @@ def run_spice_ac_gain(netlist: str) -> Dict[str, float]:
         if not log_path.exists():
             raise SpiceError("ngspice log file was not created.")
 
-        # 3) Parse the .print output lines.
+        # 4) Parse the .print output lines.
+        #
+        # Typical .print ac output:
+        #   index   freq          vm(vout)     vm(vin)
+        #   0       1.000E+03     1.000E+02    1.000E+00
+        #
+        # So we expect FOUR numeric columns: index, freq, vm(vout), vm(vin).
         float_line_regex = re.compile(
             r"^\s*([0-9.eE+\-]+)\s+([0-9.eE+\-]+)\s+([0-9.eE+\-]+)\s+([0-9.eE+\-]+)"
         )
@@ -125,6 +122,7 @@ def run_spice_ac_gain(netlist: str) -> Dict[str, float]:
                 "cannot compute gain in dB."
             )
 
+        # With AC source magnitude = 1 V, |Vout| = gain.
         gain_linear = vm_vout
         gain_db = 20.0 * math.log10(gain_linear)
 
@@ -133,6 +131,3 @@ def run_spice_ac_gain(netlist: str) -> Dict[str, float]:
             "vm_vout": vm_vout,
             "vm_vin": vm_vin if vm_vin is not None else 0.0,
         }
-
-
-

@@ -105,33 +105,46 @@ def circuit_to_spice_netlist(circuit: Circuit) -> str:
 
 
 
-def build_non_inverting_ac_netlist(circuit: Circuit, freq_hz: float = 1000.0) -> str:
-    lines = [f"* AC gain test for circuit: {circuit.name}"]
+def build_non_inverting_ac_netlist(
+    circuit: Circuit,
+    freq_hz: float = 1000.0,
+) -> str:
+    lines: List[str] = [f"* AC gain test for circuit: {circuit.name}"]
 
-    # 1) AC excitation
+    # 1) AC source: 1V from Vin to ground
     lines.append("V1 Vin 0 AC 1")
 
-    # 2) Resistors
+    # 2) Resistors from the circuit
     for comp in circuit.components:
         if comp.ctype == "R":
             lines.append(f"{comp.ref} {comp.node1} {comp.node2} {comp.value}")
+        # Ignore OPAMP component, we insert our own model.
 
-    # 3) TL072 real op-amp
-    # We only include by filename; the file will be copied into the temp dir
-    # by spice_runner.run_spice_ac_gain().
-    lines.append('.include "TL072.301"')
-    lines.append("VCC VCC 0 15")
-    lines.append("VEE VEE 0 -15")
-    lines.append("XU1 Vplus Vminus Vout VCC VEE TL072")
+        # 3) OP284-like single-pole op-amp model (ngspice-friendly)
+    lines.append("* OP284-like single-pole op-amp model")
+    lines.append("* A0 = 2e5, GBW ~ 4 MHz -> fp ~ 20 Hz")
 
-    # 4) AC analysis
+    # Internal high-gain stage
+    lines.append("EOPAMP_INT NINT 0 Vplus Vminus 2e5")
+
+    # Small output resistor from internal node to output
+    lines.append("RBUF NINT Vout 1")
+
+    # RC at the output node sets dominant pole around 20 Hz:
+    # fp = 1 / (2*pi*R*C) -> R = 1k, C ~= 7.9uF
+    lines.append("RPOLE Vout 0 1k")
+    lines.append("CPOLE Vout 0 7.9u")
+
+
+    # 4) AC analysis at a single frequency
     lines.append(f".ac lin 1 {freq_hz} {freq_hz}")
 
-    # 5) Print results
+    # 5) Print magnitudes of Vout and Vin
     lines.append(".print ac vm(Vout) vm(Vin)")
 
     lines.append(".end")
     return "\n".join(lines)
+
 
 
 
