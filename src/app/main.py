@@ -7,6 +7,14 @@ from core.optimization import (
 )
 from core.circuit import Circuit
 
+from core.netlist import build_ac_sweep_netlist
+from core.spice_runner import run_spice_ac_sweep
+from core.analysis import find_3db_bandwidth
+
+from core.netlist import build_noise_netlist
+from core.spice_runner import run_spice_noise_sweep
+from core.analysis import summarize_noise
+
 
 def main() -> None:
     # 1) Start from template circuit
@@ -18,7 +26,7 @@ def main() -> None:
               f"{comp.node1} {comp.node2}")
 
     target_gain_db = 40.0
-    freq_hz = 100000000.0
+    freq_hz = 1000000.0
 
     # 2) Ideal optimization (fast, purely analytical)
     ideal_circuit, ideal_gain_db = optimize_gain_for_non_inverting_stage(
@@ -52,6 +60,34 @@ def main() -> None:
     print(f"Target gain (SPICE):   {target_gain_db:.2f} dB")
     print(f"Achieved (SPICE):      {measured_gain_db:.2f} dB")
     print(f"Iterations used:       {it}")
+
+    print("\nRunning AC sweep for bandwidth...")
+    net = build_ac_sweep_netlist(final_circuit)
+    ac = run_spice_ac_sweep(net)
+
+    bw = find_3db_bandwidth(ac["freq_hz"], ac["gain_db"])
+    if bw is None:
+        print("Bandwidth (-3 dB): > sweep range (no rolloff found)")
+    else:
+        print(f"Bandwidth (-3 dB): {bw/1000:.2f} kHz")
+
+    # 4) Noise analysis 10 Hz – 20 kHz
+    print("\nRunning noise analysis (10 Hz – 20 kHz).")
+    noise_net = build_noise_netlist(
+        final_circuit,
+        f_start=10.0,
+        f_stop=20_000.0,
+        points=50,
+    )
+    noise_res = run_spice_noise_sweep(noise_net)
+
+    onoise = noise_res["total_onoise_rms"]   # V_rms at output
+    inoise = noise_res["total_inoise_rms"]   # V_rms equivalent at input
+
+    print(f"Total output noise 10 Hz–20 kHz: {onoise*1e6:.2f} µV_rms")
+    print(f"Equivalent input noise 10 Hz–20 kHz: {inoise*1e9:.2f} nV_rms")
+
+
 
 
 if __name__ == "__main__":

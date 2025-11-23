@@ -16,3 +16,20 @@ def extract_gain_from_spice_output(results: Dict) -> float:
     For now, just pass through a dummy field.
     """
     return float(results.get("gain_db", 0.0))
+
+
+def find_3db_bandwidth(freq, gain_db, dc_gain_db=None):
+    if dc_gain_db is None:
+        dc_gain_db = gain_db[0]
+
+    target = dc_gain_db - 3.0
+    for f, g in zip(freq, gain_db):
+        if g <= target:
+            return f
+    return None
+
+def summarize_noise(noise_result: Dict) -> Dict[str, float]:
+    return {
+        "total_output_rms": float(noise_result["total_onoise_rms"]),
+        "total_input_rms": float(noise_result["total_inoise_rms"]),
+    }
