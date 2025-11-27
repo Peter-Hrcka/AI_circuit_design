@@ -10,6 +10,77 @@ from __future__ import annotations
 from typing import List
 
 from .circuit import Circuit, Component
+from .model_metadata import ModelMetadata  # add this import at the top
+
+
+def _emit_opamp_block(lines: List[str], circuit: Circuit) -> None:
+    """
+    Append either a vendor op-amp instantiation or the internal OP284-like
+    macromodel to 'lines', depending on what is stored in circuit.metadata.
+
+    For vendor model:
+        - emits .include "<file>"
+        - adds simple supply rails
+        - instantiates XU1 with a guessed pin order
+
+    For built-in model:
+        - emits EOPAMP_INT + RBUF + RPOLE + CPOLE
+    """
+    model_file = circuit.metadata.get("opamp_model_file")
+    subckt_name = circuit.metadata.get("opamp_subckt_name")
+
+    if model_file and subckt_name:
+        # --- Vendor model path -----------------------------------------
+        lines.append(f'.include "{model_file}"')
+        lines.append("* Simple op-amp supply rails (adjust as needed)")
+        lines.append("VCC VCC 0 DC 15")
+        lines.append("VEE VEE 0 DC -15")
+
+        # NOTE: You MUST match this pin order to the vendor model's .SUBCKT.
+        # This is a very common order: +IN, -IN, OUT, VCC, VEE
+        # If OP284 uses a different order, change this XU1 line accordingly.
+        lines.append(
+            f"XU1 Vplus Vminus Vout VCC VEE {subckt_name}"
+        )
+    else:
+        # --- Built-in OP284-like macromodel (your existing behavior) ---
+        lines.append("* OP284-like single-pole op-amp model")
+        lines.append("* A0 = 2e5, GBW ~ 4 MHz -> fp ~ 20 Hz")
+        lines.append("EOPAMP_INT NINT 0 Vplus Vminus 2e5")
+        lines.append("RBUF NINT Vout 1")
+        lines.append("RPOLE Vout 0 1k")
+        lines.append("CPOLE Vout 0 7.9u")
+
+
+
+def attach_vendor_opamp_model(
+    circuit: Circuit,
+    model_file: str,
+    subckt_name: str,
+    meta: ModelMetadata | None = None,
+) -> None:
+    """
+    Attach a vendor op-amp model to this circuit.
+
+    Args:
+        circuit: Circuit to annotate.
+        model_file: Path to the vendor .lib/.cir/.sub file (absolute or relative).
+        subckt_name: Name of the .SUBCKT inside that file, e.g. "OP284".
+        meta: Optional ModelMetadata from model_analyzer.analyze_model().
+             If provided, we store the recommended simulator hint.
+
+    This does NOT change any components. It only stores metadata so that
+    the SPICE netlist builders know to emit .include + XU1 ... SUBCKT
+    instead of the internal OP284-like macromodel.
+    """
+    circuit.metadata["opamp_model_file"] = model_file
+    circuit.metadata["opamp_subckt_name"] = subckt_name
+
+    if meta is not None:
+        circuit.metadata["opamp_model_vendor"] = meta.vendor or ""
+        circuit.metadata["opamp_model_rec_sim"] = meta.recommended_simulator
+        circuit.metadata["opamp_model_is_pspice"] = str(meta.is_pspice)
+        circuit.metadata["opamp_model_is_ltspice"] = str(meta.is_ltspice)
 
 
 
@@ -118,23 +189,9 @@ def build_non_inverting_ac_netlist(
     for comp in circuit.components:
         if comp.ctype == "R":
             lines.append(f"{comp.ref} {comp.node1} {comp.node2} {comp.value}")
-        # Ignore OPAMP component, we insert our own model.
 
-        # 3) OP284-like single-pole op-amp model (ngspice-friendly)
-    lines.append("* OP284-like single-pole op-amp model")
-    lines.append("* A0 = 2e5, GBW ~ 4 MHz -> fp ~ 20 Hz")
-
-    # Internal high-gain stage
-    lines.append("EOPAMP_INT NINT 0 Vplus Vminus 2e5")
-
-    # Small output resistor from internal node to output
-    lines.append("RBUF NINT Vout 1")
-
-    # RC at the output node sets dominant pole around 20 Hz:
-    # fp = 1 / (2*pi*R*C) -> R = 1k, C ~= 7.9uF
-    lines.append("RPOLE Vout 0 1k")
-    lines.append("CPOLE Vout 0 7.9u")
-
+    # 3) Op-amp: either vendor model (if attached) or internal macro
+    _emit_opamp_block(lines, circuit)
 
     # 4) AC analysis at a single frequency
     lines.append(f".ac lin 1 {freq_hz} {freq_hz}")
@@ -144,7 +201,6 @@ def build_non_inverting_ac_netlist(
 
     lines.append(".end")
     return "\n".join(lines)
-
 
 
 
@@ -162,19 +218,16 @@ def build_ac_sweep_netlist(
         if comp.ctype == "R":
             lines.append(f"{comp.ref} {comp.node1} {comp.node2} {comp.value}")
 
-    # OP284 model (same as before)
-    lines.append("* OP284-like model")
-    lines.append("EOPAMP_INT NINT 0 Vplus Vminus 2e5")
-    lines.append("RBUF NINT Vout 1")
-    lines.append("RPOLE Vout 0 1k")
-    lines.append("CPOLE Vout 0 7.9u")
+    # Op-amp block (vendor or built-in)
+    _emit_opamp_block(lines, circuit)
 
     lines.append(f".ac dec  {points}  {f_start}  {f_stop}")
-    # lines.append(".print ac freq vm(Vout) vm(Vin)")
-    lines.append(".print ac vm(Vout)")
+    # Safer for both ngspice & Xyce: print both Vout and Vin
+    lines.append(".print ac vm(Vout) vm(Vin)")
     lines.append(".end")
 
     return "\n".join(lines)
+
 
 def build_noise_netlist(
     circuit: Circuit,
@@ -182,15 +235,6 @@ def build_noise_netlist(
     f_stop: float = 20_000.0,
     points: int = 50,
 ) -> str:
-    """
-    Build a SPICE netlist for noise analysis of the non-inverting op-amp stage.
-
-    We:
-    - excite the circuit with source V1 (DC 0, AC 1)
-    - reuse the OP284-like macromodel
-    - run noise analysis over [f_start, f_stop] with 'dec' sweep
-    - inside a .control block, print onoise_total and inoise_total
-    """
     lines = [f"* Noise analysis - {circuit.name}"]
 
     # Input source MUST have DC and AC for .noise to be happy
@@ -201,17 +245,12 @@ def build_noise_netlist(
         if comp.ctype == "R":
             lines.append(f"{comp.ref} {comp.node1} {comp.node2} {comp.value}")
 
-    # OP284 model (same as AC)
-    lines.append("* OP284-like model")
-    lines.append("EOPAMP_INT NINT 0 Vplus Vminus 2e5")
-    lines.append("RBUF NINT Vout 1")
-    lines.append("RPOLE Vout 0 1k")
-    lines.append("CPOLE Vout 0 7.9u")
+    # Op-amp block (vendor or built-in)
+    _emit_opamp_block(lines, circuit)
 
     # Use a control block so we can use ngspice 'noise' and 'print' commands
     lines.append(".control")
     lines.append(f"noise V(Vout) V1 dec {points} {f_start} {f_stop}")
-    # Switch to the integrated-noise plot and print totals
     lines.append("setplot noise2")
     lines.append("print onoise_total inoise_total")
     lines.append("quit")
@@ -220,5 +259,6 @@ def build_noise_netlist(
     lines.append(".end")
 
     return '\n'.join(lines)
+
 
 
