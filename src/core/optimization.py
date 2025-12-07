@@ -19,8 +19,15 @@ from typing import Tuple
 import math
 
 from .circuit import Circuit, Component
-from .netlist import build_non_inverting_ac_netlist
-from .spice_runner import run_spice_ac_gain, SpiceError
+from .netlist import build_non_inverting_ac_netlist, build_general_ac_netlist
+
+from .spice_runner import SpiceError
+from .simulator_manager import default_simulator_manager as sims
+from .model_metadata import ModelMetadata
+
+
+
+
 
 
 
@@ -86,13 +93,17 @@ def optimize_gain_for_non_inverting_stage(
 
     return optimized, achieved_gain_db
 
+from typing import Optional, Tuple  # ensure Optional, Tuple imported
+
 def optimize_gain_spice_loop(
     circuit: Circuit,
     target_gain_db: float,
     freq_hz: float = 1000.0,
     max_iterations: int = 5,
     tolerance_db: float = 0.1,
+    model_meta: Optional[ModelMetadata] = None,
 ) -> Tuple[Circuit, float, int]:
+
     """
     SPICE-in-the-loop optimizer for the non-inverting op-amp stage.
 
@@ -126,11 +137,11 @@ def optimize_gain_spice_loop(
     # 2) Iterative SPICE-based tuning
     last_gain_db = None
     for it in range(1, max_iterations + 1):
-        # Build netlist for current values
+        # Build netlist for current values (uses vendor or internal model)
         netlist = build_non_inverting_ac_netlist(optimized, freq_hz=freq_hz)
 
         try:
-            res = run_spice_ac_gain(netlist)
+            res = sims.run_ac_gain(netlist, model_meta)
         except SpiceError as exc:
             # In a real app, you'd propagate this or log it.
             # For now, we break and return whatever we have.
@@ -187,5 +198,63 @@ def optimize_gain_spice_loop(
     print("[SPICE LOOP] Reached max_iterations without meeting tolerance.")
     return optimized, last_gain_db, max_iterations
 
+def _find_output_node(circuit: Circuit) -> str:
+    """
+    Find the output node for a circuit.
+    Priority:
+    1. VOUT marker from schematic (stored in circuit.metadata)
+    2. Op-amp output nodes
+    3. Nodes with "out" in the name
+    4. Default to "Vout"
+    """
+    # First priority: Check for explicit VOUT marker
+    vout_node = circuit.metadata.get("output_node")
+    if vout_node:
+        return vout_node
+    
+    # Second priority: Check for op-amp output nodes
+    for comp in circuit.components:
+        if comp.ctype == "OPAMP":
+            out_node = comp.extra.get("output_node")
+            if out_node:
+                return out_node
+    
+    # Third priority: Look for nodes with "out" in the name (case-insensitive)
+    all_nodes = set()
+    for comp in circuit.components:
+        all_nodes.add(comp.node1)
+        all_nodes.add(comp.node2)
+    
+    for node in all_nodes:
+        if "out" in node.lower():
+            return node
+    
+    # Default
+    return "Vout"
 
+
+def measure_gain_spice(circuit, freq_hz: float, model_meta, input_node: str = "Vin", output_node: str = None):
+    """
+    Run a single-frequency AC analysis for the given circuit and return
+    the gain in dB at freq_hz, using the existing SimulatorManager.
+    
+    Args:
+        circuit: Circuit to simulate
+        freq_hz: Frequency for AC analysis
+        model_meta: Model metadata (for simulator selection)
+        input_node: Input node name (default: "Vin")
+        output_node: Output node name (auto-detected if None)
+    """
+    # Auto-detect output node if not provided
+    if output_node is None:
+        output_node = _find_output_node(circuit)
+    
+    # Build the AC netlist using general builder
+    net = build_general_ac_netlist(circuit, freq_hz=freq_hz, input_node=input_node, output_node=output_node)
+
+    # Use the multi-backend manager (ngspice / Xyce) to run AC gain
+    result = sims.run_ac_gain(net, model_meta)
+
+    # Same structure as in your optimization / main pipeline
+    return float(result["gain_db"])
 

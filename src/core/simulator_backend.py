@@ -18,6 +18,7 @@ from .spice_runner import (
     run_spice_ac_gain,
     run_spice_ac_sweep,
     run_spice_noise_sweep,
+    run_spice_dc_analysis,
     SpiceError,
 )
 
@@ -64,6 +65,16 @@ class ISpiceBackend(ABC):
           }
         """
         raise NotImplementedError
+    
+    @abstractmethod
+    def run_dc_analysis(self, netlist: str) -> Dict[str, float]:
+        """
+        DC operating point analysis:
+        - netlist must contain `.op` and `.print dc`
+        - returns dictionary mapping node names to DC voltages (in volts)
+        - Example: {"0": 0.0, "Vin": 5.0, "Vout": 2.5, ...}
+        """
+        raise NotImplementedError
 
 
 class NgSpiceBackend(ISpiceBackend):
@@ -84,3 +95,6 @@ class NgSpiceBackend(ISpiceBackend):
 
     def run_noise_sweep(self, netlist: str) -> Dict[str, list | float]:
         return run_spice_noise_sweep(netlist)
+    
+    def run_dc_analysis(self, netlist: str) -> Dict[str, float]:
+        return run_spice_dc_analysis(netlist)

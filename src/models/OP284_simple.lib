@@ -1,0 +1,21 @@
+* Auto-generated simplified macromodel for OP284
+* Original file: OP284.lib
+* Original vendor: ADI
+*
+* This model is intentionally approximate.
+* It replaces a complex vendor PSpice/LTspice model with
+* a single-pole op-amp macromodel suitable for:
+*   - small-signal AC gain
+*   - bandwidth estimation
+*   - rough noise analysis
+* It is NOT intended for detailed transient/THD accuracy.
+*
+.SUBCKT OP284 VPLUS VMINUS VOUT VCC VEE
+* Power rails are currently not used in the small-signal model.
+* Differential input to internal high-gain node
+EOPAMP_INT NINT 0 VPLUS VMINUS 200000
+* Buffer and dominant pole at the output
+RBUF NINT VOUT 1
+RPOLE VOUT 0 1000
+CPOLE VOUT 0 7.95775e-06
+.ENDS OP284

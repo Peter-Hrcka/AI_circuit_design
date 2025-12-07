@@ -112,6 +112,14 @@ class SimulatorManager:
     ) -> Dict[str, list | float]:
         backend = self._choose_backend(meta)
         return backend.run_noise_sweep(netlist)
+    
+    def run_dc_analysis(
+        self,
+        netlist: str,
+        meta: Optional[ModelMetadata] = None,
+    ) -> Dict[str, float]:
+        backend = self._choose_backend(meta)
+        return backend.run_dc_analysis(netlist)
 
 
 # A default global manager instance that you can import and reuse.

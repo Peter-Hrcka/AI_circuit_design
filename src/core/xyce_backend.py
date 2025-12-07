@@ -146,6 +146,16 @@ class XyceBackend(ISpiceBackend):
     # ------------------------------------------------------------------
     # Noise analysis
     # ------------------------------------------------------------------
+    def run_dc_analysis(self, netlist: str) -> Dict[str, float]:
+        """
+        Xyce DC operating point analysis.
+        Note: This is a placeholder - Xyce DC analysis parsing would need
+        to be implemented based on Xyce's output format.
+        """
+        # For now, delegate to ngspice-style parsing if possible
+        # In a full implementation, this would parse Xyce's .op output
+        raise NotImplementedError("DC analysis for Xyce backend not yet implemented")
+    
     def run_noise_sweep(self, netlist: str) -> Dict[str, float | List[float]]:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir = Path(tmpdir)

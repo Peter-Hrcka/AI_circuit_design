@@ -296,3 +296,136 @@ def run_spice_noise_sweep(netlist: str) -> Dict[str, float]:
             "total_onoise_rms": float(onoise_total),
             "total_inoise_rms": float(inoise_total),
         }
+
+
+def run_spice_dc_analysis(netlist: str) -> Dict[str, float]:
+    """
+    Run ngspice DC operating point analysis (.op) and return nodal voltages.
+    
+    Returns:
+        Dictionary mapping node names to DC voltages (in volts).
+        Example: {"0": 0.0, "Vin": 5.0, "Vout": 2.5, ...}
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir_path = Path(tmpdir)
+        netlist_path = tmpdir_path / "circuit_dc.cir"
+        log_path = tmpdir_path / "ngspice.log"
+        
+        # Write the netlist
+        netlist_path.write_text(netlist, encoding="utf-8")
+        
+        # Call ngspice in batch mode
+        try:
+            result = subprocess.run(
+                [NGSPICE_EXECUTABLE, "-b", "-o", str(log_path), str(netlist_path)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except FileNotFoundError as exc:
+            raise SpiceError(
+                f"{NGSPICE_EXECUTABLE} executable not found. Make sure it is "
+                "installed and available on your PATH."
+            ) from exc
+        
+        # Read the log
+        log_text = ""
+        if log_path.exists():
+            log_text = log_path.read_text(encoding="utf-8", errors="ignore")
+        
+        if result.returncode != 0:
+            raise SpiceError(
+                "ngspice failed with return code "
+                f"{result.returncode}.\n\n"
+                "=== NETLIST SENT TO NGSPICE ===\n"
+                f"{netlist}\n\n"
+                "=== NGSPICE STDOUT ===\n"
+                f"{result.stdout}\n\n"
+                "=== NGSPICE STDERR ===\n"
+                f"{result.stderr}\n\n"
+                "=== NGSPICE LOG ===\n"
+                f"{log_text}"
+            )
+        
+        if not log_path.exists():
+            raise SpiceError("ngspice log file was not created.")
+        
+        # Parse the .op output
+        # ngspice .op output format:
+        #   Node                                    Voltage
+        #   ----                                    -------
+        #   0                                       0.000000
+        #   Vin                                     5.000000
+        #   Vout                                    2.500000
+        #   ...
+        
+        nodal_voltages: Dict[str, float] = {}
+        
+        # Look for the voltage table
+        in_voltage_table = False
+        for line in log_text.splitlines():
+            # Check if we're entering the voltage table
+            if "Node" in line and "Voltage" in line:
+                in_voltage_table = True
+                continue
+            
+            # Skip separator line
+            if in_voltage_table and "----" in line:
+                continue
+            
+            # Parse voltage lines
+            if in_voltage_table:
+                # Skip separator lines and empty lines
+                if not line.strip() or "----" in line:
+                    continue
+                
+                # Check if we've reached the end of the voltage table
+                # (look for common patterns that indicate end of table)
+                if any(marker in line.lower() for marker in ["total", "analysis time", "elapsed time"]):
+                    # Skip these summary lines - they're not node voltages
+                    continue
+                
+                # Split by whitespace, but node names might have spaces
+                # Format: "node_name    voltage_value"
+                parts = line.split()
+                if len(parts) >= 2:
+                    # Last part should be the voltage
+                    try:
+                        voltage = float(parts[-1])
+                        # Everything before the last part is the node name
+                        node_name = " ".join(parts[:-1]).strip()
+                        
+                        # Filter out invalid node names (internal SPICE parameters)
+                        # Valid node names typically:
+                        # - Are short (not sentences)
+                        # - Don't contain common parameter keywords
+                        # - Are not empty
+                        if node_name and len(node_name) < 50:  # Reasonable node name length
+                            # Skip entries that look like parameters (contain common keywords)
+                            param_keywords = ["resistance", "ac", "dc", "dtemp", "bv_max", "noisy", 
+                                            "phase", "freq", "portnum", "z0", "acmag", "i", "p",
+                                            "total", "analysis", "time", "seconds", "elapsed",
+                                            "rsh", "narrow", "short", "tc1", "tc2", "tce", "defw",
+                                            "l", "kf", "af", "r", "lf", "wf", "ef"]
+                            
+                            node_lower = node_name.lower()
+                            # Check if this looks like a parameter (contains keyword + value)
+                            is_parameter = any(keyword in node_lower for keyword in param_keywords)
+                            
+                            # Also skip if it has #branch (current through voltage source)
+                            if "#branch" in node_lower:
+                                is_parameter = True
+                            
+                            if not is_parameter:
+                                nodal_voltages[node_name] = voltage
+                    except ValueError:
+                        # Not a valid voltage line, might be end of table
+                        pass
+        
+        if not nodal_voltages:
+            raise SpiceError(
+                "Could not parse nodal voltages from ngspice output.\n"
+                "Raw log:\n" + log_text
+            )
+        
+        return nodal_voltages

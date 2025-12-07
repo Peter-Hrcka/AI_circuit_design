@@ -7,7 +7,7 @@ For now:
 """
 
 from __future__ import annotations
-from typing import List
+from typing import List, Dict
 
 from .circuit import Circuit, Component
 from .model_metadata import ModelMetadata  # add this import at the top
@@ -147,60 +147,174 @@ def non_inverting_opamp_template() -> Circuit:
 
 def circuit_to_spice_netlist(circuit: Circuit) -> str:
     """
-    Convert a Circuit object into a VERY SIMPLE SPICE-like netlist.
-
-    This is a placeholder that we will later extend:
-    - proper op-amp subcircuits
-    - analysis commands
-    - .include lines for vendor models
+    Convert a Circuit object into a general SPICE netlist.
+    
+    Supports:
+    - Resistors (R)
+    - Capacitors (C)
+    - Voltage sources (V)
+    - Op-amps (OPAMP) - uses internal macromodel or vendor model
     """
     lines: List[str] = [f"* Netlist for circuit: {circuit.name}"]
+    lines.append("")
 
+    # Process components
+    opamps: List[Component] = []
+    
     for comp in circuit.components:
         if comp.ctype == "R":
             # RESISTOR: R<ref> node1 node2 value
             lines.append(f"{comp.ref} {comp.node1} {comp.node2} {comp.value}")
+        
+        elif comp.ctype == "C":
+            # CAPACITOR: C<ref> node1 node2 value
+            lines.append(f"{comp.ref} {comp.node1} {comp.node2} {comp.value}")
+        
+        elif comp.ctype == "V":
+            # VOLTAGE SOURCE: V<ref> node+ node- DC value
+            # For AC analysis, we'll add AC 1 later if needed
+            lines.append(f"{comp.ref} {comp.node1} {comp.node2} DC {comp.value}")
+        
+        elif comp.ctype == "I":
+            # CURRENT SOURCE: I<ref> node+ node- DC value
+            lines.append(f"{comp.ref} {comp.node1} {comp.node2} DC {comp.value}")
+        
         elif comp.ctype == "OPAMP":
-            # Placeholder: an ideal op-amp notation (to be replaced with real subckt)
-            lines.append(
-                f"* {comp.ref} OPAMP between {comp.node1} and {comp.node2} (ideal placeholder)"
-            )
+            # Op-amp: store for special handling
+            opamps.append(comp)
+        
         else:
-            # Unknown / not yet implemented
-            lines.append(
-                f"* {comp.ref} type {comp.ctype} not yet implemented in netlist exporter"
-            )
-
+            # Unknown component type
+            lines.append(f"* {comp.ref} type {comp.ctype} not yet implemented")
+    
+    # Handle op-amps (emit op-amp blocks)
+    for opamp in opamps:
+        # Get output node from extra dict
+        out_node = opamp.extra.get("output_node", "Vout")
+        
+        # Create a temporary circuit with just this op-amp for _emit_opamp_block
+        # We need to map the op-amp's nodes to the expected names
+        temp_circuit = Circuit(name="temp")
+        temp_circuit.metadata = circuit.metadata.copy()
+        
+        # Map op-amp nodes to expected names for _emit_opamp_block
+        # The function expects Vplus, Vminus, Vout
+        # We'll create a mapping or modify the function to be more general
+        # For now, let's create a general op-amp emitter
+        _emit_general_opamp_block(lines, opamp, circuit.metadata)
+    
+    lines.append("")
     lines.append(".end")
     return "\n".join(lines)
 
+
+def _emit_general_opamp_block(lines: List[str], opamp: Component, metadata: Dict[str, str]) -> None:
+    """
+    Emit op-amp block for a general op-amp component.
+    
+    Uses node1=non-inverting, node2=inverting, and output_node from extra dict.
+    Uses supply rails from opamp.extra if available, otherwise defaults.
+    """
+    plus_node = opamp.node1
+    minus_node = opamp.node2
+    out_node = opamp.extra.get("output_node", "Vout")
+    
+    # Get supply rails from component extra properties, or use defaults
+    vcc = opamp.extra.get("vcc", 15.0)
+    vee = opamp.extra.get("vee", -15.0)
+    
+    model_file = metadata.get("opamp_model_file")
+    subckt_name = metadata.get("opamp_subckt_name")
+    
+    if model_file and subckt_name:
+        # Vendor model path
+        lines.append(f'.include "{model_file}"')
+        lines.append(f"* Op-amp supply rails: VCC={vcc}V, VEE={vee}V")
+        lines.append(f"VCC VCC 0 DC {vcc}")
+        lines.append(f"VEE VEE 0 DC {vee}")
+        # Common pin order: +IN, -IN, OUT, VCC, VEE
+        lines.append(f"X{opamp.ref} {plus_node} {minus_node} {out_node} VCC VEE {subckt_name}")
+    else:
+        # Built-in OP284-like macromodel
+        lines.append(f"* {opamp.ref}: OP284-like single-pole op-amp model")
+        lines.append("* A0 = 2e5, GBW ~ 4 MHz -> fp ~ 20 Hz")
+        nint = f"NINT_{opamp.ref}"
+        lines.append(f"EOPAMP_INT_{opamp.ref} {nint} 0 {plus_node} {minus_node} 2e5")
+        lines.append(f"RBUF_{opamp.ref} {nint} {out_node} 1")
+        lines.append(f"RPOLE_{opamp.ref} {out_node} 0 1k")
+        lines.append(f"CPOLE_{opamp.ref} {out_node} 0 7.9u")
+
+
+
+def build_general_ac_netlist(
+    circuit: Circuit,
+    freq_hz: float = 1000.0,
+    input_node: str = "Vin",
+    output_node: str = "Vout",
+) -> str:
+    """
+    Build a general AC analysis netlist for any circuit topology.
+    
+    Args:
+        circuit: Circuit to simulate
+        freq_hz: Frequency for AC analysis
+        input_node: Node name for input (will add AC source if not present)
+        output_node: Node name for output (for measurement)
+    """
+    lines: List[str] = [f"* AC analysis for circuit: {circuit.name}"]
+    lines.append("")
+
+    # Check if there's already a voltage source
+    has_vsource = False
+    vsource_node = None
+    for comp in circuit.components:
+        if comp.ctype == "V":
+            has_vsource = True
+            vsource_node = comp.node1  # Assume positive terminal
+            # Convert to AC source if it's DC
+            lines.append(f"{comp.ref} {comp.node1} {comp.node2} DC 0 AC 1")
+            break
+    
+    # Add AC source if not present
+    if not has_vsource:
+        lines.append(f"V1 {input_node} 0 AC 1")
+        vsource_node = input_node
+
+    # Add all components
+    opamps: List[Component] = []
+    for comp in circuit.components:
+        if comp.ctype == "R":
+            lines.append(f"{comp.ref} {comp.node1} {comp.node2} {comp.value}")
+        elif comp.ctype == "C":
+            lines.append(f"{comp.ref} {comp.node1} {comp.node2} {comp.value}")
+        elif comp.ctype == "V":
+            # Already handled above
+            pass
+        elif comp.ctype == "OPAMP":
+            opamps.append(comp)
+    
+    # Emit op-amp blocks
+    for opamp in opamps:
+        _emit_general_opamp_block(lines, opamp, circuit.metadata)
+
+    # AC analysis
+    lines.append("")
+    lines.append(f".ac lin 1 {freq_hz} {freq_hz}")
+    lines.append(f".print ac vm({output_node}) vm({vsource_node})")
+    lines.append(".end")
+    
+    return "\n".join(lines)
 
 
 def build_non_inverting_ac_netlist(
     circuit: Circuit,
     freq_hz: float = 1000.0,
 ) -> str:
-    lines: List[str] = [f"* AC gain test for circuit: {circuit.name}"]
-
-    # 1) AC source: 1V from Vin to ground
-    lines.append("V1 Vin 0 AC 1")
-
-    # 2) Resistors from the circuit
-    for comp in circuit.components:
-        if comp.ctype == "R":
-            lines.append(f"{comp.ref} {comp.node1} {comp.node2} {comp.value}")
-
-    # 3) Op-amp: either vendor model (if attached) or internal macro
-    _emit_opamp_block(lines, circuit)
-
-    # 4) AC analysis at a single frequency
-    lines.append(f".ac lin 1 {freq_hz} {freq_hz}")
-
-    # 5) Print magnitudes of Vout and Vin
-    lines.append(".print ac vm(Vout) vm(Vin)")
-
-    lines.append(".end")
-    return "\n".join(lines)
+    """
+    Build AC netlist for non-inverting op-amp stage (backward compatibility).
+    Now uses the general builder.
+    """
+    return build_general_ac_netlist(circuit, freq_hz=freq_hz, input_node="Vin", output_node="Vout")
 
 
 
@@ -209,23 +323,116 @@ def build_ac_sweep_netlist(
     f_start: float = 10.0,
     f_stop: float = 1e7,
     points: int = 200,
+    input_node: str = "Vin",
+    output_node: str = "Vout",
 ) -> str:
-
+    """
+    Build a general AC sweep netlist for any circuit topology.
+    """
     lines = [f"* AC sweep for bandwidth - {circuit.name}"]
-    lines.append("V1 Vin 0 AC 1")
+    lines.append("")
 
+    # Check if there's already a voltage source
+    has_vsource = False
+    vsource_node = None
+    for comp in circuit.components:
+        if comp.ctype == "V":
+            has_vsource = True
+            vsource_node = comp.node1
+            lines.append(f"{comp.ref} {comp.node1} {comp.node2} DC 0 AC 1")
+            break
+    
+    if not has_vsource:
+        lines.append(f"V1 {input_node} 0 AC 1")
+        vsource_node = input_node
+
+    # Add all components
+    opamps: List[Component] = []
     for comp in circuit.components:
         if comp.ctype == "R":
             lines.append(f"{comp.ref} {comp.node1} {comp.node2} {comp.value}")
+        elif comp.ctype == "C":
+            lines.append(f"{comp.ref} {comp.node1} {comp.node2} {comp.value}")
+        elif comp.ctype == "V":
+            # Already handled above
+            pass
+        elif comp.ctype == "OPAMP":
+            opamps.append(comp)
+    
+    # Emit op-amp blocks
+    for opamp in opamps:
+        _emit_general_opamp_block(lines, opamp, circuit.metadata)
 
-    # Op-amp block (vendor or built-in)
-    _emit_opamp_block(lines, circuit)
-
-    lines.append(f".ac dec  {points}  {f_start}  {f_stop}")
-    # Safer for both ngspice & Xyce: print both Vout and Vin
-    lines.append(".print ac vm(Vout) vm(Vin)")
+    lines.append("")
+    lines.append(f".ac dec {points} {f_start} {f_stop}")
+    lines.append(f".print ac vm({output_node}) vm({vsource_node})")
     lines.append(".end")
 
+    return "\n".join(lines)
+
+
+def build_dc_netlist(circuit: Circuit) -> str:
+    """
+    Build a DC analysis netlist for any circuit topology.
+    
+    Performs operating point analysis (.op) to get nodal voltages.
+    
+    Args:
+        circuit: Circuit to simulate
+        
+    Returns:
+        SPICE netlist string for DC analysis
+    """
+    lines: List[str] = [f"* DC analysis (operating point) for circuit: {circuit.name}"]
+    lines.append("")
+    
+    # Check if there's already a voltage source or current source
+    has_vsource = False
+    has_isource = False
+    for comp in circuit.components:
+        if comp.ctype == "V":
+            has_vsource = True
+            # Use DC value from component
+            dc_value = comp.value
+            lines.append(f"{comp.ref} {comp.node1} {comp.node2} DC {dc_value}")
+            break
+        elif comp.ctype == "I":
+            has_isource = True
+    
+    # Add DC voltage source if not present and no current source (default 5V)
+    # Note: If there's a current source, we don't need a default voltage source
+    if not has_vsource and not has_isource:
+        lines.append("V1 Vin 0 DC 5")
+    
+    # Add all components
+    opamps: List[Component] = []
+    for comp in circuit.components:
+        if comp.ctype == "R":
+            lines.append(f"{comp.ref} {comp.node1} {comp.node2} {comp.value}")
+        elif comp.ctype == "C":
+            # For DC analysis, capacitors are open circuits
+            # We can either omit them or add them with very large value
+            # For now, we'll omit them (they don't affect DC)
+            pass
+        elif comp.ctype == "V":
+            # Already handled above
+            pass
+        elif comp.ctype == "I":
+            # CURRENT SOURCE: I<ref> node+ node- DC value
+            lines.append(f"{comp.ref} {comp.node1} {comp.node2} DC {comp.value}")
+        elif comp.ctype == "OPAMP":
+            opamps.append(comp)
+    
+    # Emit op-amp blocks
+    for opamp in opamps:
+        _emit_general_opamp_block(lines, opamp, circuit.metadata)
+    
+    # DC operating point analysis
+    lines.append("")
+    lines.append(".op")
+    lines.append(".print dc")
+    lines.append(".end")
+    
     return "\n".join(lines)
 
 
@@ -234,23 +441,50 @@ def build_noise_netlist(
     f_start: float = 10.0,
     f_stop: float = 20_000.0,
     points: int = 50,
+    input_node: str = "Vin",
+    output_node: str = "Vout",
 ) -> str:
+    """
+    Build a general noise analysis netlist for any circuit topology.
+    """
     lines = [f"* Noise analysis - {circuit.name}"]
+    lines.append("")
 
-    # Input source MUST have DC and AC for .noise to be happy
-    lines.append("V1 Vin 0 DC 0 AC 1")
+    # Check if there's already a voltage source
+    has_vsource = False
+    vsource_ref = "V1"
+    for comp in circuit.components:
+        if comp.ctype == "V":
+            has_vsource = True
+            vsource_ref = comp.ref
+            # Input source MUST have DC and AC for .noise to be happy
+            lines.append(f"{comp.ref} {comp.node1} {comp.node2} DC 0 AC 1")
+            break
+    
+    if not has_vsource:
+        lines.append(f"V1 {input_node} 0 DC 0 AC 1")
 
-    # Resistors
+    # Add all components
+    opamps: List[Component] = []
     for comp in circuit.components:
         if comp.ctype == "R":
             lines.append(f"{comp.ref} {comp.node1} {comp.node2} {comp.value}")
-
-    # Op-amp block (vendor or built-in)
-    _emit_opamp_block(lines, circuit)
+        elif comp.ctype == "C":
+            lines.append(f"{comp.ref} {comp.node1} {comp.node2} {comp.value}")
+        elif comp.ctype == "V":
+            # Already handled above
+            pass
+        elif comp.ctype == "OPAMP":
+            opamps.append(comp)
+    
+    # Emit op-amp blocks
+    for opamp in opamps:
+        _emit_general_opamp_block(lines, opamp, circuit.metadata)
 
     # Use a control block so we can use ngspice 'noise' and 'print' commands
+    lines.append("")
     lines.append(".control")
-    lines.append(f"noise V(Vout) V1 dec {points} {f_start} {f_stop}")
+    lines.append(f"noise V({output_node}) {vsource_ref} dec {points} {f_start} {f_stop}")
     lines.append("setplot noise2")
     lines.append("print onoise_total inoise_total")
     lines.append("quit")
