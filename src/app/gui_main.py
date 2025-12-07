@@ -19,10 +19,21 @@ from PySide6.QtWidgets import (
     QTabWidget,
     QInputDialog,
     QDialog,
+    QMenuBar,
+    QMenu,
+    QToolBar,
+    QDockWidget,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QListWidget,
+    QListWidgetItem,
+    QGroupBox,
+    QComboBox,
+    QDoubleSpinBox,
+    QFormLayout,
 )
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QShortcut, QKeySequence
-from PySide6.QtGui import QShortcut, QKeySequence
+from PySide6.QtGui import QShortcut, QKeySequence, QAction
 
 from app.schematic_view import SchematicView
 from app.component_properties_dialog import ComponentPropertiesDialog
@@ -240,153 +251,183 @@ class MainWindow(QMainWindow):
         self.last_freq_hz: float | None = None
         self.last_target_gain_db: float | None = None
         self.selected_component_ref = None  # Currently selected component for rotation
-        self.setWindowTitle("AI Circuit Designer")
+        self.setWindowTitle("AI-Assisted Circuit Designer")
 
-        central = QWidget()
-        self.setCentralWidget(central)
-
-        layout = QVBoxLayout(central)
-
-        # --- Model file selector -------------------------------------------------
-        file_row = QHBoxLayout()
-        layout.addLayout(file_row)
-
-        file_row.addWidget(QLabel("Op-amp model (.lib):"))
-        self.model_path_edit = QLineEdit()
-        file_row.addWidget(self.model_path_edit)
-
-        browse_btn = QPushButton("Browse...")
-        browse_btn.clicked.connect(self.on_browse_model)
-        file_row.addWidget(browse_btn)
-
-        # --- Target gain ---------------------------------------------------------
-        gain_row = QHBoxLayout()
-        layout.addLayout(gain_row)
-
-        gain_row.addWidget(QLabel("Target gain (dB):"))
-        self.target_gain_edit = QLineEdit("40.0")
-        gain_row.addWidget(self.target_gain_edit)
-
-        # --- Test frequency ------------------------------------------------------
-        freq_row = QHBoxLayout()
-        layout.addLayout(freq_row)
-
-        freq_row.addWidget(QLabel("Test frequency (Hz):"))
-        self.freq_edit = QLineEdit("1000000")  # 1 MHz by default
-        freq_row.addWidget(self.freq_edit)
-
-        # --- Run buttons ----------------------------------------------------------
-        run_row = QHBoxLayout()
-        layout.addLayout(run_row)
-
-        run_btn = QPushButton("Run optimization")
-        run_btn.clicked.connect(self.on_run)
-        run_row.addWidget(run_btn)
-
-        resim_btn = QPushButton("Re-simulate current schematic")
-        resim_btn.clicked.connect(self.on_resimulate_current)
-        run_row.addWidget(resim_btn)
-
-        sim_schem_btn = QPushButton("Simulate FROM schematic (no optimization)")
-        sim_schem_btn.clicked.connect(self.on_simulate_from_schematic)
-        run_row.addWidget(sim_schem_btn)
+        # Initialize UI components
+        self._setup_menu_bar()
+        self._setup_toolbars()
+        self._setup_central_widget()
+        self._setup_left_dock()  # Component Library
+        self._setup_right_dock()  # Properties / Analysis Setup
+        self._setup_bottom_dock()  # Log / Results
         
-        dc_btn = QPushButton("DC Analysis")
-        dc_btn.clicked.connect(self.on_dc_analysis)
-        run_row.addWidget(dc_btn)
-
-
-
-        # --- Component Palette / Toolbox ----------------------------------------
-        palette_row = QHBoxLayout()
-        layout.addLayout(palette_row)
+        # Setup keyboard shortcuts
+        self._setup_keyboard_shortcuts()
         
-        palette_row.addWidget(QLabel("Components:"))
+        # Note: model_path_edit, target_gain_edit, and freq_edit are created in _setup_right_dock()
+
+    def _setup_menu_bar(self):
+        """Create menu bar with File, Edit, View, Simulation, AI, Tools, Help menus."""
+        menubar = self.menuBar()
+        
+        # File menu
+        file_menu = menubar.addMenu("File")
+        file_menu.addAction("New", self._stub_action("New schematic"))
+        file_menu.addAction("Open", self._stub_action("Open schematic"))
+        file_menu.addAction("Save", self._stub_action("Save schematic"))
+        file_menu.addAction("Save As...", self._stub_action("Save schematic as"))
+        file_menu.addSeparator()
+        file_menu.addAction("Import Model...", self.on_browse_model)
+        file_menu.addSeparator()
+        file_menu.addAction("Exit", self.close)
+        
+        # Edit menu
+        edit_menu = menubar.addMenu("Edit")
+        edit_menu.addAction("Undo", self._stub_action("Undo"))
+        edit_menu.addAction("Redo", self._stub_action("Redo"))
+        edit_menu.addSeparator()
+        edit_menu.addAction("Cut", self._stub_action("Cut"))
+        edit_menu.addAction("Copy", self._stub_action("Copy"))
+        edit_menu.addAction("Paste", self._stub_action("Paste"))
+        edit_menu.addSeparator()
+        edit_menu.addAction("Select All", self._stub_action("Select all"))
+        edit_menu.addAction("Delete", lambda: self.on_delete_mode() if hasattr(self, 'btn_delete') else self._stub_action("Delete"))
+        
+        # View menu
+        view_menu = menubar.addMenu("View")
+        view_menu.addAction("Zoom In", self._stub_action("Zoom in"))
+        view_menu.addAction("Zoom Out", self._stub_action("Zoom out"))
+        view_menu.addAction("Zoom Fit", self._stub_action("Zoom to fit"))
+        view_menu.addSeparator()
+        view_menu.addAction("Show Grid", self._stub_action("Toggle grid"))
+        
+        # Simulation menu
+        sim_menu = menubar.addMenu("Simulation")
+        sim_menu.addAction("Run DC", self.on_dc_analysis)
+        sim_menu.addAction("Run AC", self._stub_action("Run AC analysis"))
+        sim_menu.addAction("Run Transient", self._stub_action("Run transient analysis"))
+        sim_menu.addAction("Run Noise", self._stub_action("Run noise analysis"))
+        sim_menu.addAction("Run FFT/THD", self._stub_action("Run FFT/THD analysis"))
+        sim_menu.addSeparator()
+        sim_menu.addAction("Re-simulate Current", self.on_resimulate_current)
+        
+        # AI menu
+        ai_menu = menubar.addMenu("AI")
+        ai_menu.addAction("AI Optimize", self._stub_action("AI Optimize"))
+        ai_menu.addAction("AI Explain Circuit", self._stub_action("AI Explain Circuit"))
+        
+        # Tools menu
+        tools_menu = menubar.addMenu("Tools")
+        tools_menu.addAction("Component Properties", self._stub_action("Open component properties"))
+        tools_menu.addAction("Netlist Preview", self._stub_action("Show netlist"))
+        
+        # Help menu
+        help_menu = menubar.addMenu("Help")
+        help_menu.addAction("About", self._stub_action("About"))
+        help_menu.addAction("Documentation", self._stub_action("Documentation"))
+
+    def _setup_toolbars(self):
+        """Create main toolbar with editing tools (left) and simulation controls (right)."""
+        # Main toolbar
+        toolbar = QToolBar("Main Toolbar")
+        toolbar.setMovable(False)
+        self.addToolBar(toolbar)
         
         # Component placement buttons - create mapping first
         self._placement_button_to_type = {}
         
-        self.btn_place_resistor = QPushButton("Resistor")
-        self.btn_place_resistor.setCheckable(True)
-        self._placement_button_to_type[self.btn_place_resistor] = "R"
-        self.btn_place_resistor.clicked.connect(self.on_place_component_clicked)
-        palette_row.addWidget(self.btn_place_resistor)
-        
-        self.btn_place_capacitor = QPushButton("Capacitor")
-        self.btn_place_capacitor.setCheckable(True)
-        self._placement_button_to_type[self.btn_place_capacitor] = "C"
-        self.btn_place_capacitor.clicked.connect(self.on_place_component_clicked)
-        palette_row.addWidget(self.btn_place_capacitor)
-        
-        self.btn_place_opamp = QPushButton("Op-amp")
-        self.btn_place_opamp.setCheckable(True)
-        self._placement_button_to_type[self.btn_place_opamp] = "OPAMP"
-        self.btn_place_opamp.clicked.connect(self.on_place_component_clicked)
-        palette_row.addWidget(self.btn_place_opamp)
-        
-        self.btn_place_voltage = QPushButton("Voltage Source")
-        self.btn_place_voltage.setCheckable(True)
-        self._placement_button_to_type[self.btn_place_voltage] = "V"
-        self.btn_place_voltage.clicked.connect(self.on_place_component_clicked)
-        palette_row.addWidget(self.btn_place_voltage)
-        
-        self.btn_place_current = QPushButton("Current Source")
-        self.btn_place_current.setCheckable(True)
-        self._placement_button_to_type[self.btn_place_current] = "I"
-        self.btn_place_current.clicked.connect(self.on_place_component_clicked)
-        palette_row.addWidget(self.btn_place_current)
-        
-        self.btn_place_ground = QPushButton("Ground")
-        self.btn_place_ground.setCheckable(True)
-        self._placement_button_to_type[self.btn_place_ground] = "GND"
-        self.btn_place_ground.clicked.connect(self.on_place_component_clicked)
-        palette_row.addWidget(self.btn_place_ground)
-        
-        self.btn_place_vout = QPushButton("Vout")
-        self.btn_place_vout.setCheckable(True)
-        self._placement_button_to_type[self.btn_place_vout] = "VOUT"
-        self.btn_place_vout.clicked.connect(self.on_place_component_clicked)
-        palette_row.addWidget(self.btn_place_vout)
-        
-        palette_row.addWidget(QLabel("|"))
-        
-        self.btn_delete = QPushButton("Delete")
-        self.btn_delete.setCheckable(True)
-        self.btn_delete.clicked.connect(self.on_delete_mode)
-        palette_row.addWidget(self.btn_delete)
-        
-        palette_row.addStretch()
-
-        # --- Toolbox: interaction mode -----------------------------------------
-        tool_row = QHBoxLayout()
-        layout.addLayout(tool_row)
-
-        tool_row.addWidget(QLabel("Mode:"))
-
-        self.btn_mode_select = QPushButton("Select / Edit")
+        # Editing tools (left side)
+        self.btn_mode_select = QPushButton("Select")
         self.btn_mode_select.setCheckable(True)
         self.btn_mode_select.setChecked(True)
         self.btn_mode_select.clicked.connect(self.on_mode_select)
-        tool_row.addWidget(self.btn_mode_select)
-
+        toolbar.addWidget(self.btn_mode_select)
+        
         self.btn_mode_wire = QPushButton("Wire")
         self.btn_mode_wire.setCheckable(True)
         self.btn_mode_wire.clicked.connect(self.on_mode_wire)
-        tool_row.addWidget(self.btn_mode_wire)
-
-        tool_row.addWidget(QLabel("|"))
+        toolbar.addWidget(self.btn_mode_wire)
         
-        self.btn_rotate = QPushButton("Rotate 90°")
-        self.btn_rotate.clicked.connect(self.on_rotate_component)
-        tool_row.addWidget(self.btn_rotate)
-
-        tool_row.addWidget(QLabel("|"))
+        toolbar.addSeparator()
         
-        self.btn_rotate = QPushButton("Rotate 90°")
+        # Quick placement buttons
+        self.btn_place_resistor = QPushButton("R")
+        self.btn_place_resistor.setCheckable(True)
+        self.btn_place_resistor.setToolTip("Resistor")
+        self._placement_button_to_type[self.btn_place_resistor] = "R"
+        self.btn_place_resistor.clicked.connect(self.on_place_component_clicked)
+        toolbar.addWidget(self.btn_place_resistor)
+        
+        self.btn_place_capacitor = QPushButton("C")
+        self.btn_place_capacitor.setCheckable(True)
+        self.btn_place_capacitor.setToolTip("Capacitor")
+        self._placement_button_to_type[self.btn_place_capacitor] = "C"
+        self.btn_place_capacitor.clicked.connect(self.on_place_component_clicked)
+        toolbar.addWidget(self.btn_place_capacitor)
+        
+        btn_l = QPushButton("L")
+        btn_l.setToolTip("Inductor")
+        btn_l.clicked.connect(lambda: self._stub_action("Place Inductor")())
+        toolbar.addWidget(btn_l)
+        
+        btn_diode = QPushButton("D")
+        btn_diode.setToolTip("Diode")
+        btn_diode.clicked.connect(lambda: self._stub_action("Place Diode")())
+        toolbar.addWidget(btn_diode)
+        
+        btn_bjt = QPushButton("BJT")
+        btn_bjt.setToolTip("BJT Transistor")
+        btn_bjt.clicked.connect(lambda: self._stub_action("Place BJT")())
+        toolbar.addWidget(btn_bjt)
+        
+        btn_mosfet = QPushButton("MOS")
+        btn_mosfet.setToolTip("MOSFET")
+        btn_mosfet.clicked.connect(lambda: self._stub_action("Place MOSFET")())
+        toolbar.addWidget(btn_mosfet)
+        
+        self.btn_place_opamp = QPushButton("Op")
+        self.btn_place_opamp.setCheckable(True)
+        self.btn_place_opamp.setToolTip("Op-amp")
+        self._placement_button_to_type[self.btn_place_opamp] = "OPAMP"
+        self.btn_place_opamp.clicked.connect(self.on_place_component_clicked)
+        toolbar.addWidget(self.btn_place_opamp)
+        
+        self.btn_place_voltage = QPushButton("V")
+        self.btn_place_voltage.setCheckable(True)
+        self.btn_place_voltage.setToolTip("Voltage Source")
+        self._placement_button_to_type[self.btn_place_voltage] = "V"
+        self.btn_place_voltage.clicked.connect(self.on_place_component_clicked)
+        toolbar.addWidget(self.btn_place_voltage)
+        
+        self.btn_place_ground = QPushButton("GND")
+        self.btn_place_ground.setCheckable(True)
+        self.btn_place_ground.setToolTip("Ground")
+        self._placement_button_to_type[self.btn_place_ground] = "GND"
+        self.btn_place_ground.clicked.connect(self.on_place_component_clicked)
+        toolbar.addWidget(self.btn_place_ground)
+        
+        btn_net_label = QPushButton("Net")
+        btn_net_label.setToolTip("Net Label")
+        btn_net_label.clicked.connect(lambda: self._stub_action("Place Net Label")())
+        toolbar.addWidget(btn_net_label)
+        
+        toolbar.addSeparator()
+        
+        self.btn_rotate = QPushButton("Rotate")
         self.btn_rotate.clicked.connect(self.on_rotate_component)
-        tool_row.addWidget(self.btn_rotate)
-
-        tool_row.addStretch()
+        toolbar.addWidget(self.btn_rotate)
+        
+        btn_flip = QPushButton("Flip")
+        btn_flip.clicked.connect(lambda: self._stub_action("Flip component")())
+        toolbar.addWidget(btn_flip)
+        
+        self.btn_delete = QPushButton("Del")
+        self.btn_delete.setCheckable(True)
+        self.btn_delete.setToolTip("Delete")
+        self.btn_delete.clicked.connect(self.on_delete_mode)
+        toolbar.addWidget(self.btn_delete)
+        
+        toolbar.addSeparator()
         
         # Store component placement buttons for mode management
         self._placement_buttons = [
@@ -395,35 +436,297 @@ class MainWindow(QMainWindow):
             self.btn_place_opamp,
             self.btn_place_voltage,
             self.btn_place_ground,
-            self.btn_place_vout,
         ]
-
-
-        # --- Tabs: Log + Schematic ----------------------------------------------
-        self.tabs = QTabWidget()
-        layout.addWidget(self.tabs)
-
-        # Log tab
-        log_widget = QWidget()
-        log_layout = QVBoxLayout(log_widget)
-        log_layout.addWidget(QLabel("Log:"))
-        self.output = QTextEdit()
-        self.output.setReadOnly(True)
-        log_layout.addWidget(self.output)
-        self.tabs.addTab(log_widget, "Log")
-
-        # Schematic tab
-        self.schematic_view = SchematicView()
-        self.tabs.addTab(self.schematic_view, "Schematic")
         
-        # Set Schematic tab as default (index 1, since Log is index 0)
-        self.tabs.setCurrentIndex(1)
+        # Simulation & AI controls (right side of toolbar)
+        toolbar.addSeparator()
+        toolbar.addWidget(QLabel("|"))  # Visual separator
+        
+        btn_dc = QPushButton("DC")
+        btn_dc.clicked.connect(self.on_dc_analysis)
+        toolbar.addWidget(btn_dc)
+        
+        btn_ac = QPushButton("AC")
+        btn_ac.clicked.connect(lambda: self._stub_action("Run AC")())
+        toolbar.addWidget(btn_ac)
+        
+        btn_transient = QPushButton("Trans")
+        btn_transient.setToolTip("Transient")
+        btn_transient.clicked.connect(lambda: self._stub_action("Run Transient")())
+        toolbar.addWidget(btn_transient)
+        
+        btn_noise = QPushButton("Noise")
+        btn_noise.clicked.connect(lambda: self._stub_action("Run Noise")())
+        toolbar.addWidget(btn_noise)
+        
+        btn_fft = QPushButton("FFT")
+        btn_fft.clicked.connect(lambda: self._stub_action("Run FFT/THD")())
+        toolbar.addWidget(btn_fft)
+        
+        toolbar.addSeparator()
+        
+        btn_ai_opt = QPushButton("AI Optimize")
+        btn_ai_opt.clicked.connect(lambda: self._stub_action("AI Optimize")())
+        toolbar.addWidget(btn_ai_opt)
+        
+        btn_ai_explain = QPushButton("AI Explain")
+        btn_ai_explain.setToolTip("AI Explain Circuit")
+        btn_ai_explain.clicked.connect(lambda: self._stub_action("AI Explain Circuit")())
+        toolbar.addWidget(btn_ai_explain)
 
+    def _setup_central_widget(self):
+        """Set SchematicView as the central widget."""
+        self.schematic_view = SchematicView()
+        self.setCentralWidget(self.schematic_view)
+        
         # React to clicks on components in the schematic
         self.schematic_view.componentClicked.connect(self.on_component_clicked)
+
+    def _setup_left_dock(self):
+        """Create left dock widget for Component Library."""
+        dock = QDockWidget("Component Library", self)
+        dock.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
         
-        # Setup keyboard shortcuts
-        self._setup_keyboard_shortcuts()
+        # Create tree widget for component categories
+        tree = QTreeWidget()
+        tree.setHeaderLabel("Components")
+        tree.setRootIsDecorated(True)
+        
+        # Passive Components
+        passive_item = QTreeWidgetItem(tree, ["Passive Components"])
+        tree.addTopLevelItem(passive_item)
+        passive_item.addChild(QTreeWidgetItem(["Resistor"]))
+        passive_item.addChild(QTreeWidgetItem(["Capacitor"]))
+        passive_item.addChild(QTreeWidgetItem(["Inductor"]))
+        passive_item.setExpanded(True)
+        
+        # Semiconductors
+        semi_item = QTreeWidgetItem(tree, ["Semiconductors"])
+        tree.addTopLevelItem(semi_item)
+        semi_item.addChild(QTreeWidgetItem(["Diode"]))
+        semi_item.addChild(QTreeWidgetItem(["Zener diode"]))
+        semi_item.addChild(QTreeWidgetItem(["BJT (NPN / PNP)"]))
+        semi_item.addChild(QTreeWidgetItem(["MOSFET (NMOS / PMOS)"]))
+        semi_item.setExpanded(True)
+        
+        # Sources
+        sources_item = QTreeWidgetItem(tree, ["Sources"])
+        tree.addTopLevelItem(sources_item)
+        sources_item.addChild(QTreeWidgetItem(["Voltage source (DC, AC, Pulse, PWL)"]))
+        sources_item.addChild(QTreeWidgetItem(["Current source (DC, AC)"]))
+        sources_item.setExpanded(True)
+        
+        # Controlled Sources
+        controlled_item = QTreeWidgetItem(tree, ["Controlled Sources"])
+        tree.addTopLevelItem(controlled_item)
+        controlled_item.addChild(QTreeWidgetItem(["VCVS (E)"]))
+        controlled_item.addChild(QTreeWidgetItem(["VCCS (G)"]))
+        controlled_item.addChild(QTreeWidgetItem(["CCVS (H)"]))
+        controlled_item.addChild(QTreeWidgetItem(["CCCS (F)"]))
+        controlled_item.setExpanded(True)
+        
+        # Op-amps
+        opamp_item = QTreeWidgetItem(tree, ["Op-Amps"])
+        tree.addTopLevelItem(opamp_item)
+        opamp_item.addChild(QTreeWidgetItem(["Generic op-amp symbol"]))
+        opamp_item.addChild(QTreeWidgetItem(["Vendor op-amps placeholder"]))
+        opamp_item.setExpanded(True)
+        
+        # User Macros (future)
+        macros_item = QTreeWidgetItem(tree, ["User Macros (future)"])
+        tree.addTopLevelItem(macros_item)
+        macros_item.addChild(QTreeWidgetItem(["Custom subcircuits"]))
+        macros_item.setExpanded(True)
+        
+        # Connect item selection to component placement
+        tree.itemDoubleClicked.connect(self._on_component_library_item_selected)
+        
+        dock.setWidget(tree)
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, dock)
+        
+    def _setup_right_dock(self):
+        """Create right dock widget for Properties / Analysis Setup."""
+        dock = QDockWidget("Properties / Analysis Setup", self)
+        dock.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
+        
+        # Create tabbed widget
+        tabs = QTabWidget()
+        
+        # Properties tab
+        props_widget = QWidget()
+        props_layout = QVBoxLayout(props_widget)
+        
+        self.properties_info = QLabel("No component selected")
+        self.properties_info.setWordWrap(True)
+        props_layout.addWidget(self.properties_info)
+        
+        self.btn_properties_dialog = QPushButton("Edit Properties...")
+        self.btn_properties_dialog.clicked.connect(self._on_open_properties_dialog)
+        self.btn_properties_dialog.setEnabled(False)
+        props_layout.addWidget(self.btn_properties_dialog)
+        
+        props_layout.addStretch()
+        tabs.addTab(props_widget, "Properties")
+        
+        # Analysis Setup tab
+        analysis_widget = QWidget()
+        analysis_layout = QVBoxLayout(analysis_widget)
+        
+        # Analysis type
+        form = QFormLayout()
+        analysis_type_combo = QComboBox()
+        analysis_type_combo.addItems(["DC", "AC", "Transient", "Noise", "FFT/THD"])
+        form.addRow("Analysis Type:", analysis_type_combo)
+        
+        # Frequency (for AC, FFT)
+        self.freq_edit = QDoubleSpinBox()
+        self.freq_edit.setRange(1.0, 1e12)
+        self.freq_edit.setValue(1000000.0)  # 1 MHz default
+        self.freq_edit.setSuffix(" Hz")
+        form.addRow("Frequency:", self.freq_edit)
+        
+        # Time span (for Transient)
+        time_span_edit = QDoubleSpinBox()
+        time_span_edit.setRange(1e-9, 1.0)
+        time_span_edit.setValue(0.001)
+        time_span_edit.setSuffix(" s")
+        form.addRow("Time Span:", time_span_edit)
+        
+        analysis_layout.addLayout(form)
+        
+        # Model file selector (moved from old layout)
+        model_group = QGroupBox("Model File")
+        model_layout = QVBoxLayout()
+        self.model_path_edit = QLineEdit()
+        model_layout.addWidget(self.model_path_edit)
+        browse_btn = QPushButton("Browse...")
+        browse_btn.clicked.connect(self.on_browse_model)
+        model_layout.addWidget(browse_btn)
+        model_group.setLayout(model_layout)
+        analysis_layout.addWidget(model_group)
+        
+        # Target gain (for optimization - moved from old layout)
+        opt_group = QGroupBox("Optimization")
+        opt_layout = QFormLayout()
+        self.target_gain_edit = QLineEdit("40.0")
+        opt_layout.addRow("Target Gain (dB):", self.target_gain_edit)
+        opt_group.setLayout(opt_layout)
+        analysis_layout.addWidget(opt_group)
+        
+        analysis_layout.addStretch()
+        tabs.addTab(analysis_widget, "Analysis Setup")
+        
+        dock.setWidget(tabs)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+
+    def _setup_bottom_dock(self):
+        """Create bottom dock widget for Log / Results."""
+        dock = QDockWidget("Log / Results", self)
+        dock.setAllowedAreas(Qt.DockWidgetArea.BottomDockWidgetArea | Qt.DockWidgetArea.TopDockWidgetArea)
+        
+        # Create tabbed widget
+        tabs = QTabWidget()
+        
+        # Simulation Log tab
+        sim_log_widget = QWidget()
+        sim_log_layout = QVBoxLayout(sim_log_widget)
+        self.output = QTextEdit()
+        self.output.setReadOnly(True)
+        sim_log_layout.addWidget(self.output)
+        tabs.addTab(sim_log_widget, "Simulation Log")
+        
+        # AI Log tab
+        ai_log_widget = QWidget()
+        ai_log_layout = QVBoxLayout(ai_log_widget)
+        self.ai_log_output = QTextEdit()
+        self.ai_log_output.setReadOnly(True)
+        self.ai_log_output.setPlainText("AI Log.\nAI reasoning and suggestions will appear here.")
+        ai_log_layout.addWidget(self.ai_log_output)
+        tabs.addTab(ai_log_widget, "AI Log")
+        
+        # Netlist Preview tab
+        netlist_widget = QWidget()
+        netlist_layout = QVBoxLayout(netlist_widget)
+        self.netlist_output = QTextEdit()
+        self.netlist_output.setReadOnly(True)
+        self.netlist_output.setPlainText("Netlist preview will appear here.")
+        netlist_layout.addWidget(self.netlist_output)
+        tabs.addTab(netlist_widget, "Netlist Preview")
+        
+        # Placeholder tabs for plots (stubs for now)
+        tabs.addTab(QWidget(), "AC Plot (Bode)")
+        tabs.addTab(QWidget(), "Noise Plot")
+        tabs.addTab(QWidget(), "Transient Waveform")
+        tabs.addTab(QWidget(), "FFT / THD Plot")
+        
+        dock.setWidget(tabs)
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, dock)
+
+    def _on_component_library_item_selected(self, item: QTreeWidgetItem, column: int):
+        """Handle component selection from library tree.
+        Maps component names to placement types and activates placement mode.
+        """
+        text = item.text(column)
+        if item.parent() is None:  # Skip category items
+            return
+            
+        # Map component library items to placement types
+        component_map = {
+            "Resistor": "R",
+            "Capacitor": "C",
+            "Inductor": "L",
+            "Diode": "D",
+            "Zener diode": "D",  # For now, use D
+            "BJT (NPN / PNP)": "BJT",
+            "MOSFET (NMOS / PMOS)": "MOSFET",
+            "Voltage source (DC, AC, Pulse, PWL)": "V",
+            "Current source (DC, AC)": "I",
+            "VCVS (E)": "E",
+            "VCCS (G)": "G",
+            "CCVS (H)": "H",
+            "CCCS (F)": "F",
+            "Generic op-amp symbol": "OPAMP",
+            "Vendor op-amps placeholder": "OPAMP",
+        }
+        
+        component_type = component_map.get(text)
+        if component_type:
+            # Activate placement mode
+            self.log(f"Component library: Selected '{text}' - activating placement mode")
+            # Uncheck all placement buttons
+            for btn in self._placement_buttons:
+                btn.setChecked(False)
+            self.btn_mode_select.setChecked(False)
+            self.btn_mode_wire.setChecked(False)
+            
+            # Find and activate the corresponding button
+            for btn, ctype in self._placement_button_to_type.items():
+                if ctype == component_type:
+                    btn.setChecked(True)
+                    self.schematic_view.set_placement_mode(component_type)
+                    return
+            
+            # If no button found, activate placement mode directly
+            if component_type in ["R", "C", "OPAMP", "V", "GND"]:
+                # These have buttons, already handled above
+                pass
+            else:
+                # For components without toolbar buttons, activate placement mode directly
+                self.schematic_view.set_placement_mode(component_type)
+                self.log(f"Placement mode activated for {component_type}")
+        else:
+            self.log(f"Component library: '{text}' selected (placement mode not yet implemented)")
+
+    def _on_open_properties_dialog(self):
+        """Open properties dialog for selected component."""
+        self._on_edit_properties_from_panel()
+
+    def _stub_action(self, action_name: str):
+        """Return a stub slot function for unimplemented features."""
+        def stub():
+            QMessageBox.information(self, "Not Implemented", f"{action_name} is not implemented yet.")
+            print(f"STUB: {action_name}")
+        return stub
     
 
 
@@ -443,7 +746,7 @@ class MainWindow(QMainWindow):
             "",
             "SPICE Models (*.lib *.cir *.sub *.sp *.spi);;All Files (*.*)",
         )
-        if path:
+        if path and hasattr(self, 'model_path_edit') and self.model_path_edit is not None:
             self.model_path_edit.setText(path)
 
     def _load_model_with_conversion(self, path: str) -> Optional[ModelMetadata]:
@@ -482,20 +785,35 @@ class MainWindow(QMainWindow):
     def on_run(self) -> None:
         self.output.clear()
 
+        # Get model path
+        if not hasattr(self, 'model_path_edit') or self.model_path_edit is None:
+            QMessageBox.warning(self, "Error", "GUI controls not initialized. Please restart the application.")
+            return
         model_path = self.model_path_edit.text().strip()
         if not model_path:
             QMessageBox.warning(self, "Missing model", "Please select a vendor model (.lib) first.")
             return
 
+        # Get target gain
         try:
+            if not hasattr(self, 'target_gain_edit') or self.target_gain_edit is None:
+                QMessageBox.warning(self, "Error", "GUI controls not initialized.")
+                return
             target_gain_db = float(self.target_gain_edit.text())
         except ValueError:
             QMessageBox.warning(self, "Invalid gain", "Please enter a numeric target gain (dB).")
             return
 
+        # Get frequency from spinbox (QDoubleSpinBox uses .value())
         try:
-            freq_hz = float(self.freq_edit.text())
-        except ValueError:
+            if not hasattr(self, 'freq_edit') or self.freq_edit is None:
+                QMessageBox.warning(self, "Error", "GUI controls not initialized.")
+                return
+            if hasattr(self.freq_edit, 'value'):
+                freq_hz = self.freq_edit.value()
+            else:
+                freq_hz = float(self.freq_edit.text())
+        except (ValueError, AttributeError):
             QMessageBox.warning(self, "Invalid frequency", "Please enter a numeric frequency (Hz).")
             return
 
@@ -634,9 +952,10 @@ class MainWindow(QMainWindow):
     def on_component_clicked(self, ref: str) -> None:
         """
         Called when user clicks a component in the schematic, e.g. "R1".
-        Opens a comprehensive properties dialog to edit component properties.
+        Updates the properties panel to show component info.
+        User can then click "Edit Properties" button to open the dialog.
         """
-        # Store selected component ref for rotation
+        # Store selected component ref for rotation and properties
         self.selected_component_ref = ref
         
         # Find component in schematic model
@@ -648,9 +967,62 @@ class MainWindow(QMainWindow):
                     break
 
         if schematic_comp is None:
-            QMessageBox.warning(self, "Not found", f"Component {ref} not found in schematic.")
+            # Clear properties panel if component not found
+            if hasattr(self, "properties_info"):
+                self.properties_info.setText("Component not found")
+                self.btn_properties_dialog.setEnabled(False)
             return
 
+        # Update properties panel with component info
+        self._update_properties_panel(schematic_comp)
+        
+        # Enable properties dialog button
+        if hasattr(self, "btn_properties_dialog"):
+            self.btn_properties_dialog.setEnabled(True)
+
+    def _update_properties_panel(self, comp):
+        """Update the properties panel with component information."""
+        if not hasattr(self, "properties_info"):
+            return
+            
+        info_lines = []
+        info_lines.append(f"<b>Reference:</b> {comp.ref}")
+        info_lines.append(f"<b>Type:</b> {comp.ctype}")
+        info_lines.append(f"<b>Value:</b> {comp.value}")
+        
+        # Show pin information
+        if comp.pins:
+            info_lines.append("<b>Net connections:</b>")
+            for pin in comp.pins:
+                net_name = pin.net if pin.net else "No net"
+                info_lines.append(f"  Pin {pin.name}: {net_name}")
+        
+        # Show extra properties
+        if comp.extra:
+            info_lines.append("<b>Extra parameters:</b>")
+            for key, value in comp.extra.items():
+                info_lines.append(f"  {key}: {value}")
+        
+        self.properties_info.setText("<br>".join(info_lines))
+        
+    def _on_edit_properties_from_panel(self):
+        """Open properties dialog for the currently selected component."""
+        if not self.selected_component_ref:
+            QMessageBox.information(self, "No Selection", "Please select a component first.")
+            return
+            
+        # Find component
+        schematic_comp = None
+        if hasattr(self, "schematic_view") and self.schematic_view.model:
+            for comp in self.schematic_view.model.components:
+                if comp.ref == self.selected_component_ref:
+                    schematic_comp = comp
+                    break
+        
+        if schematic_comp is None:
+            QMessageBox.warning(self, "Not found", f"Component {self.selected_component_ref} not found.")
+            return
+        
         # Show comprehensive properties dialog
         dialog = ComponentPropertiesDialog(schematic_comp, parent=self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
@@ -700,7 +1072,7 @@ class MainWindow(QMainWindow):
         if self.current_circuit:
             circuit_comp = None
             for comp in self.current_circuit.components:
-                if getattr(comp, "ref", "") == ref:
+                if getattr(comp, "ref", "") == self.selected_component_ref:
                     circuit_comp = comp
                     break
             
@@ -709,13 +1081,14 @@ class MainWindow(QMainWindow):
                 # Update schematic labels from circuit
                 self._update_schematic_from_circuit(self.current_circuit)
 
-        # Redraw schematic to show updated values
+        # Update properties panel and redraw schematic
+        self._update_properties_panel(schematic_comp)
         if hasattr(self, "schematic_view"):
             self.schematic_view._redraw_from_model()
         
         # Log the change
         prop_str = ", ".join(f"{k}={v}" for k, v in properties.items())
-        self.log(f"{ref} properties updated: {prop_str}. "
+        self.log(f"{self.selected_component_ref} properties updated: {prop_str}. "
                  "Re-run analysis if you want updated SPICE results.")
 
     def on_rotate_component(self):
@@ -817,11 +1190,11 @@ class MainWindow(QMainWindow):
             self.log("Running AC sweep for bandwidth (current schematic)...")
             ac_net = build_ac_sweep_netlist(circuit)
             ac_res = sims.run_ac_sweep(ac_net, meta_model)
-            bw = find_3db_bandwidth(ac_res["freq_hz"], ac_res["gain_db"])
-            if bw is None:
-                self.log("Bandwidth (-3 dB): > sweep range (no rolloff found)")
-            else:
-                self.log(f"Bandwidth (-3 dB): {bw/1000:.2f} kHz")
+        bw = find_3db_bandwidth(ac_res["freq_hz"], ac_res["gain_db"])
+        if bw is None:
+            self.log("Bandwidth (-3 dB): > sweep range (no rolloff found)")
+        else:
+            self.log(f"Bandwidth (-3 dB): {bw/1000:.2f} kHz")
 
         # Noise analysis with current values
         self.log("")

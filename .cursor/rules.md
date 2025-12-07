@@ -114,6 +114,80 @@ Cursor must allow extension of these types without breaking existing logic.
 
 Cursor MUST NOT mix GUI logic with core simulation logic.
 
+#### 2.2 GUI Layout Structure (Cursor MUST follow this high-level layout)
+
+The main GUI should follow a professional EDA / CAD layout with dockable panels:
+
+- **Top: Menu Bar**
+  - Menus: `File`, `Edit`, `View`, `Simulation`, `AI`, `Tools`, `Help`.
+
+- **Below Menu: Main Toolbar**
+  - Editing tools (left side):
+    - Pointer / Select
+    - Wire tool
+    - Quick placement for: Resistor (R), Capacitor (C), Inductor (L), Diode (D)
+    - Quick placement for: BJT, MOSFET, Op-amp
+    - Quick placement for: Voltage Source, Ground
+    - Net label tool
+    - Rotate, Flip, Delete
+  - Simulation & AI controls (right side):
+    - Run DC, Run AC, Run Transient, Run Noise, Run FFT/THD
+    - “AI Optimize” and “AI Explain Circuit” actions
+
+- **Central Area: Schematic Editor (QGraphicsView)**
+  - Displays the schematic:
+    - Grid background (optional)
+    - Components as schematic symbols
+    - Wires as connections with junction dots
+    - Net labels (VIN, VOUT, GND, N001, etc.)
+  - Interaction:
+    - Pan & zoom
+    - Click to select
+    - Drag component to move
+    - Drag from empty space to draw selection rectangle
+    - Wires snap to pins
+
+- **Left Dock: Component Library**
+  - Dockable `QDockWidget` with a component palette:
+    - Categories:
+      - Passive: R, C, L
+      - Semiconductors: Diode, Zener, BJT (NPN/PNP), MOSFET (NMOS/PMOS)
+      - Sources: Voltage (DC/AC/Pulse/PWL), Current (DC/AC)
+      - Controlled sources: VCVS (E), VCCS (G), CCCS (F), CCVS (H)
+      - Op-amps: Generic + vendor op-amps
+      - User Macros (future subcircuits)
+    - Components can be selected or drag-dropped into the schematic.
+
+- **Right Dock: Properties / Inspector Panel**
+  - Shows context-sensitive properties of the currently selected object:
+    - For components:
+      - Reference (R1, C3, Q2, M1, etc.)
+      - Value (e.g. 10kΩ, 100nF, 1mH)
+      - Model (e.g. 2N3904, OP27)
+      - Orientation (rotation, flip)
+      - Pins and net names for each pin
+      - Extra parameters (for BJTs/MOSFETs, controlled sources, etc.)
+    - For nets/wires:
+      - Net name
+      - Connected pins/components
+    - For empty selection:
+      - Global schematic + simulation defaults.
+
+- **Bottom Dock: Log & Results Panel**
+  - Dockable `QDockWidget` with tabbed views:
+    - Simulation Log (ngspice / Xyce output)
+    - AI Log (agent reasoning and suggestions)
+    - Netlist Preview (generated SPICE netlist)
+    - Plots (Bode / AC plot, Noise plot, Transient waveforms, FFT/THD)
+  - Plots may be embedded (matplotlib/pyqtgraph) as dockable widgets.
+
+Cursor MUST treat this layout as the target structure when adding or modifying GUI elements:
+- Use QDockWidget for side and bottom panels.
+- Use QGraphicsView for the schematic canvas.
+- Keep toolbar/buttons and panels aligned with these responsibilities.
+
+---
+
 ## 3. SCHEMATIC EDITOR RULES (PySide6)
 
 The schematic editor is LTspice-like:
@@ -137,6 +211,19 @@ Cursor must maintain separation:
 - GUI draws
 - Model stores electrical meaning
 - Core layer generates Circuit and SPICE netlists
+
+### 3.1 Interaction Behavior (Move vs Select)
+
+- When the user **clicks and drags starting on a component**:
+  - The operation MUST be treated as a component move.
+  - No drag-selection rectangle should appear.
+  - If multiple components are selected, they move as a group.
+- When the user **clicks and drags starting on empty space**:
+  - The operation MUST be treated as drag-selection (rubber-band selection).
+- Cursor MUST implement hit-testing on mouse press to decide:
+  - “Press on item” → move mode (no rubber-band)
+  - “Press on background” → selection mode (rubber-band)
+- This rule must be preserved whenever changing `mousePressEvent` / drag behavior.
 
 ---
 
@@ -281,5 +368,47 @@ Cursor must:
 - Preserve simulation accuracy
 - Keep code clean, extensible, production-ready
 - Move the project toward a full LTspice-class + AI-driven design platform
+
+
+## 11. Python Indentation & Formatting Rules (Cursor MUST follow)
+
+To ensure consistent and valid Python code across all modules, Cursor must enforce the following formatting rules at all times:
+
+### 11.1 Indentation Requirements
+- All Python code MUST use **4 spaces per indentation level**.
+- **Tabs are strictly forbidden**.
+- Mixing tabs and spaces is forbidden.
+- Cursor MUST convert any tabs to spaces when encountered.
+
+### 11.2 File Rewriting Policy
+- If indentation becomes ambiguous or inconsistent, Cursor MUST:
+  1. Stop generating partial diffs.
+  2. Rewrite the entire affected file with correct indentation.
+  3. Preserve behavior but normalize structure and formatting.
+
+### 11.3 Patch-Level Behavior
+When applying diffs:
+- Cursor must align indentation with the surrounding context.
+- New code blocks must follow correct Python block indentation.
+- Nested blocks must maintain correct structure (class, def, if/else, loops).
+- Cursor must not introduce misaligned blocks, accidental dedentation, or over-indentation.
+
+### 11.4 Safety Rules
+- When indentation errors appear in the output (visible or inferred), Cursor must automatically correct indentation before finalizing the patch.
+- When unsure of the correct indentation level, Cursor must rewrite the entire function or file for consistency.
+- All files must remain PEP8-compliant in indentation and whitespace.
+
+### 11.5 Editor Configuration
+Cursor must respect the following:
+- Trailing whitespace removed automatically.
+- Newline at end of file.
+- Continuation lines aligned with parentheses or 4-space blocks.
+
+### 11.6 Schematic Editor & GUI Specifics
+Because GUI code (PySide6/QGraphicsView) often contains deep nesting:
+- Cursor must prefer rewriting entire methods when indentation becomes unstable.
+- Always validate indentation after modifying event handlers, draw routines, or nested layout structures.
+
+
 
 End of rules.
