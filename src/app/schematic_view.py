@@ -126,11 +126,17 @@ class SchematicView(QGraphicsView):
         self._initial_pin_positions = []
         self._clicked_component_ref = None
         self._drag_threshold = 5.0  # pixels - minimum movement to consider it a drag
+        self._is_dragging = False  # Track if dragging has actually started
         
         # Multi-selection state
         self._selected_components: set[str] = set()  # Set of component refs that are selected
         self._selected_components_initial_positions: dict[str, tuple[float, float]] = {}  # Initial positions for all selected components
         self._selected_components_initial_pins: dict[str, list[tuple[float, float]]] = {}  # Initial pin positions for all selected components
+        self._selected_components_initial_wires: dict[str, list[tuple[float, float, float, float]]] = {}  # Initial wire endpoints for wires connected to selected components
+        
+        # Track last-known pin positions during component dragging
+        # Key: (component_ref, pin_index) tuple for hashable key
+        self._pin_last_positions: dict[tuple[str, int], tuple[float, float]] = {}
         
         # Selection rectangle (marquee selection) state
         self._selection_rect_start: QPointF | None = None  # Start point of selection rectangle
@@ -146,11 +152,15 @@ class SchematicView(QGraphicsView):
         self._redraw_from_model()
 
     def _update_drag_mode(self):
-        """Update the drag mode based on current mode."""
-        if self._mode == "select":
-            self.setDragMode(QGraphicsView.DragMode.RubberBandDrag)
-        else:
-            self.setDragMode(QGraphicsView.DragMode.NoDrag)
+        """Update the drag mode based on current mode.
+        
+        We implement our own selection rectangle and component dragging,
+        so we MUST NOT use QGraphicsView's RubberBandDrag, otherwise Qt
+        will draw its own selection rectangle even while we're moving
+        components.
+        """
+        # Always disable QGraphicsView's built-in drag selection
+        self.setDragMode(QGraphicsView.DragMode.NoDrag)
 
     def set_mode(self, mode: str):
         """Set the interaction mode: 'select', 'wire', 'place', or 'delete'."""
@@ -161,6 +171,8 @@ class SchematicView(QGraphicsView):
         self._pending_junction_pos = None
         self._wire_start_pos = None
         self._clear_preview_component()
+        # Clear preview wire when switching modes to prevent leftover preview from appearing
+        self._clear_preview_wire(reset_start=True)
         self._update_drag_mode()
 
     def set_placement_mode(self, component_type: str):
@@ -433,6 +445,26 @@ class SchematicView(QGraphicsView):
                 return True  # Overlap detected
         
         return False
+
+    def _update_wires_connected_to_pin(self, old_x: float, old_y: float, new_x: float, new_y: float):
+        """Update wires that are connected to a pin that has moved.
+        
+        Args:
+            old_x, old_y: Original pin position
+            new_x, new_y: New pin position
+        """
+        # Tolerance for matching wire endpoints to pin positions
+        tolerance = 1.0
+        
+        for wire in self.model.wires:
+            # Check if wire endpoint 1 matches the old pin position
+            if abs(wire.x1 - old_x) < tolerance and abs(wire.y1 - old_y) < tolerance:
+                wire.x1 = new_x
+                wire.y1 = new_y
+            # Check if wire endpoint 2 matches the old pin position
+            if abs(wire.x2 - old_x) < tolerance and abs(wire.y2 - old_y) < tolerance:
+                wire.x2 = new_x
+                wire.y2 = new_y
 
     def _generate_component_ref(self, component_type: str) -> str:
         """Generate a unique component reference."""
@@ -778,7 +810,7 @@ class SchematicView(QGraphicsView):
     def _draw_opamp(self, comp: SchematicComponent):
         """Draw an op-amp component (triangle)."""
         if len(comp.pins) < 3:
-            return
+                    return
 
         # Find pins
         noninv_pin = comp.pins[0]  # Non-inverting
@@ -1150,12 +1182,35 @@ class SchematicView(QGraphicsView):
                 pass
         self._preview_component_items.clear()
 
+    def _clear_preview_wire(self, reset_start=False):
+        """Clear preview wire graphics and optionally reset wire start position.
+        
+        Args:
+            reset_start: If True, also reset _preview_wire_start to None.
+                        If False, only clear the graphics items (for use during mouse move).
+        """
+        scene = self.scene()
+        # Clear preview wire items
+        if self._preview_wire_item:
+            for item in self._preview_wire_item:
+                try:
+                    # Check if item still exists by accessing its scene
+                    if item.scene() is not None:
+                        scene.removeItem(item)
+                except RuntimeError:
+                    # Item already deleted, skip it
+                    pass
+            self._preview_wire_item.clear()
+        # Reset wire start position only if requested
+        if reset_start:
+            self._preview_wire_start = None
+
     def _update_preview_component(self, x: float, y: float):
         """Update preview component at position (x, y)."""
         self._clear_preview_component()
         
         if self._placement_type is None:
-            return
+                    return
 
         snapped_x, snapped_y = self._snap_to_grid(x, y)
         
@@ -1430,10 +1485,11 @@ class SchematicView(QGraphicsView):
                 
                 if nearest_pin:
                     if self._pending_pin is None:
+                        # Start wire from pin
                         self._pending_pin = nearest_pin
                         self._preview_wire_start = (nearest_pin.x, nearest_pin.y)
                     else:
-                        # Create wire
+                        # Complete wire to pin
                         if self._pending_pin != nearest_pin:
                             wire = SchematicWire(
                                 x1=self._pending_pin.x,
@@ -1446,34 +1502,57 @@ class SchematicView(QGraphicsView):
                             self._redraw_from_model()
                         self._pending_pin = None
                         self._preview_wire_start = None
+                        self._clear_preview_wire()
                 else:
-                    # Check for wire-to-wire connection
-                    nearest_wire = find_nearest_wire(self.model.wires, x, y)
-                    if nearest_wire and self._pending_pin:
-                        # Create junction and wire
-                        junction = SchematicJunction(x=x, y=y)
-                        self.model.junctions.append(junction)
-                        # Create wire from pending pin to junction
-                        wire1 = SchematicWire(
-                            x1=self._pending_pin.x,
-                            y1=self._pending_pin.y,
-                            x2=x,
-                            y2=y,
-                            net="",  # Will be assigned by net extraction
-                        )
-                        self.model.wires.append(wire1)
-                        # Create wire from junction to nearest wire
-                        wire2 = SchematicWire(
-                            x1=x,
-                            y1=y,
-                            x2=nearest_wire.x2,
-                            y2=nearest_wire.y2,
-                            net="",  # Will be assigned by net extraction
-                        )
-                        self.model.wires.append(wire2)
-                        self._redraw_from_model()
-                        self._pending_pin = None
-                        self._preview_wire_start = None
+                    # No pin clicked - check if we should start wire from empty space or connect to wire
+                    if self._preview_wire_start is None:
+                        # First click on empty space - start wire from this position
+                        snapped_x, snapped_y = self._snap_to_grid(x, y)
+                        self._preview_wire_start = (snapped_x, snapped_y)
+                    else:
+                        # Second click - check for wire-to-wire connection or complete wire
+                        nearest_wire = find_nearest_wire(self.model.wires, x, y)
+                        if nearest_wire and self._pending_pin:
+                            # Connect from pending pin to existing wire via junction
+                            junction = SchematicJunction(x=x, y=y)
+                            self.model.junctions.append(junction)
+                            # Create wire from pending pin to junction
+                            wire1 = SchematicWire(
+                                x1=self._pending_pin.x,
+                                y1=self._pending_pin.y,
+                                x2=x,
+                                y2=y,
+                                net="",  # Will be assigned by net extraction
+                            )
+                            self.model.wires.append(wire1)
+                            # Create wire from junction to nearest wire
+                            wire2 = SchematicWire(
+                                x1=x,
+                                y1=y,
+                                x2=nearest_wire.x2,
+                                y2=nearest_wire.y2,
+                                net="",  # Will be assigned by net extraction
+                            )
+                            self.model.wires.append(wire2)
+                            self._redraw_from_model()
+                            self._pending_pin = None
+                            self._preview_wire_start = None
+                            self._clear_preview_wire()
+                        elif self._preview_wire_start:
+                            # Complete wire from start position to current position
+                            start_x, start_y = self._preview_wire_start
+                            snapped_x, snapped_y = self._snap_to_grid(x, y)
+                            wire = SchematicWire(
+                                x1=start_x,
+                                y1=start_y,
+                                x2=snapped_x,
+                                y2=snapped_y,
+                                net="",  # Will be assigned by net extraction
+                            )
+                            self.model.wires.append(wire)
+                            self._redraw_from_model()
+                            self._preview_wire_start = None
+                            self._clear_preview_wire()
             return
         
         elif self._mode == "delete":
@@ -1522,7 +1601,7 @@ class SchematicView(QGraphicsView):
                     self.model.components.remove(clicked_component)
                     self._redraw_from_model()
             return
-        
+
         elif self._mode == "select":
             if event.button() == Qt.MouseButton.LeftButton:
                 # Find clicked component using bounding box (more reliable than graphics item types)
@@ -1559,9 +1638,18 @@ class SchematicView(QGraphicsView):
                             self._selected_components_initial_positions[ref] = (comp.x, comp.y)
                             self._selected_components_initial_pins[ref] = [(p.x, p.y) for p in comp.pins]
                     
+                    # Initialize last pin positions for dragging
+                    self._pin_last_positions.clear()
+                    for ref in self._selected_components:
+                        comp = self._get_component_by_ref(ref)
+                        if comp:
+                            for i, pin in enumerate(comp.pins):
+                                self._pin_last_positions[(ref, i)] = (pin.x, pin.y)
+                    
                     # Mark that we clicked on a component - this prevents selection rectangle
                     self._clicked_component_ref = clicked_component_ref
                     self._drag_start_pos = scene_pt
+                    self._is_dragging = False  # Reset dragging state - will be set when threshold is exceeded
                     # Explicitly clear selection rectangle - we're dragging a component, not selecting
                     self._selection_rect_start = None
                     if self._selection_rect_item:
@@ -1581,7 +1669,9 @@ class SchematicView(QGraphicsView):
                     if not (event.modifiers() & (Qt.ControlModifier | Qt.ShiftModifier)):
                         self._selected_components.clear()
                         self._redraw_from_model()
+            return  # Do NOT call super() - we've fully handled the event
         
+        # Fallback: only if some future mode needs default behavior
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
@@ -1591,11 +1681,12 @@ class SchematicView(QGraphicsView):
         
         if self._mode == "place":
             self._update_preview_component(x, y)
+            return  # Do NOT call super() - we've fully handled the event
         
         elif self._mode == "wire":
             if self._preview_wire_start:
                 scene = self.scene()
-                # Clear previous preview wire segments
+                # Clear previous preview wire segments - only clear graphics, don't reset start position
                 if self._preview_wire_item:
                     for item in self._preview_wire_item:
                         try:
@@ -1632,6 +1723,7 @@ class SchematicView(QGraphicsView):
                 line2.setPen(self._preview_pen)
                 scene.addItem(line2)
                 self._preview_wire_item.append(line2)
+            return  # Do NOT call super() - we've fully handled the event
         
         elif self._mode == "select":
             # Priority: component dragging over selection rectangle
@@ -1653,7 +1745,12 @@ class SchematicView(QGraphicsView):
                     dx = x - self._drag_start_pos.x()
                     dy = y - self._drag_start_pos.y()
                     
-                    if abs(dx) > self._drag_threshold or abs(dy) > self._drag_threshold:
+                    # Check if we've moved enough to start dragging (threshold check only for initial start)
+                    # Once dragging starts, components should follow smoothly regardless of movement amount
+                    if self._is_dragging or abs(dx) > self._drag_threshold or abs(dy) > self._drag_threshold:
+                        if not self._is_dragging:
+                            self._is_dragging = True  # Mark that dragging has started
+                        
                         # Move all selected components
                         for ref in list(self._selected_components):
                             comp = self._get_component_by_ref(ref)
@@ -1671,21 +1768,43 @@ class SchematicView(QGraphicsView):
                                     for i, pin in enumerate(comp.pins):
                                         if i < len(orig_pins):
                                             orig_pin_x, orig_pin_y = orig_pins[i]
-                                            pin.x, pin.y = self._snap_to_grid(orig_pin_x + dx, orig_pin_y + dy)
+                                            new_pin_x, new_pin_y = self._snap_to_grid(orig_pin_x + dx, orig_pin_y + dy)
+                                            
+                                            # Get the previous position of this pin during the drag
+                                            pin_key = (ref, i)
+                                            old_pin_x, old_pin_y = self._pin_last_positions.get(pin_key, (pin.x, pin.y))
+                                            
+                                            # Update pin position to the new location
+                                            pin.x, pin.y = new_pin_x, new_pin_y
+                                            
+                                            # Move any wires attached to the previous pin position to the new one
+                                            self._update_wires_connected_to_pin(old_pin_x, old_pin_y, new_pin_x, new_pin_y)
+                                            
+                                            # Store the new position as the last-known position
+                                            self._pin_last_positions[pin_key] = (new_pin_x, new_pin_y)
                                 
                                 # Check for collisions
                                 if self._check_component_overlap(comp):
-                                    # Revert if collision
+                                    # Revert if collision - restore component, pins, and wires
                                     comp.x, comp.y = orig_x, orig_y
                                     if ref in self._selected_components_initial_pins:
                                         orig_pins = self._selected_components_initial_pins[ref]
                                         for i, pin in enumerate(comp.pins):
                                             if i < len(orig_pins):
-                                                pin.x, pin.y = orig_pins[i]
-                                    continue
+                                                orig_pin_x, orig_pin_y = orig_pins[i]
+                                                # Get the last-known position before reverting
+                                                pin_key = (ref, i)
+                                                old_pin_x, old_pin_y = self._pin_last_positions.get(pin_key, (pin.x, pin.y))
+                                                # Revert wires connected to this pin (from last position back to original)
+                                                self._update_wires_connected_to_pin(old_pin_x, old_pin_y, orig_pin_x, orig_pin_y)
+                                                # Revert pin position
+                                                pin.x, pin.y = orig_pin_x, orig_pin_y
+                                                # Update last-known position to original position after revert
+                                                self._pin_last_positions[pin_key] = (orig_pin_x, orig_pin_y)
                         
                         self._redraw_from_model()
-                        self._drag_start_pos = scene_pt  # Update drag start for next move
+                        # Do NOT update _drag_start_pos - it should remain fixed at initial click position
+                        # This ensures delta is always calculated from the original drag start
             
             elif self._selection_rect_start is not None and self._drag_start_pos is not None and self._clicked_component_ref is None and not self._selected_components:
                 # Draw selection rectangle (only if not dragging a component and clicked on empty space)
@@ -1705,7 +1824,9 @@ class SchematicView(QGraphicsView):
                 self._selection_rect_item.setBrush(self._selection_rect_brush)
                 self._selection_rect_item.setZValue(1000)
                 scene.addItem(self._selection_rect_item)
+            return  # Do NOT call super() - we've fully handled the event
         
+        # Fallback: only if some future mode needs default behavior
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
@@ -1732,6 +1853,14 @@ class SchematicView(QGraphicsView):
             self._selection_rect_start = None
             self._redraw_from_model()
         
+        if self._mode == "select":
+            self._drag_start_pos = None
+            self._clicked_component_ref = None  # Clear component reference on release
+            self._is_dragging = False  # Reset dragging state
+            self._pin_last_positions.clear()  # Clear last pin positions for next drag
+            return  # Do NOT call super() - we've fully handled the event
+        
+        # Fallback: only if some future mode needs default behavior
         self._drag_start_pos = None
-        self._clicked_component_ref = None  # Clear component reference on release
+        self._clicked_component_ref = None
         super().mouseReleaseEvent(event)
