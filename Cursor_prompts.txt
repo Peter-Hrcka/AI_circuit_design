@@ -1,4 +1,21 @@
-Reformat the entire file for correct Python indentation. 
+Reformat the entire schematic_view.py for correct Python indentation. 
 Rewrite the whole file as a consistent, valid Python module. 
 Use 4-space indentation. 
 Do not change any behavior.
+
+
+
+
+
+
+
+git add .
+git commit -m "Some change"
+git push
+
+git pull
+
+
+
+git remote add origin git@github.com:phrcka-invn/validation_stack.git
+

@@ -30,6 +30,8 @@ class SchematicView(QGraphicsView):
 
     # Emitted when user clicks a component body (e.g. "R1", "R2", "Rin")
     componentClicked = Signal(str)
+    # Emitted when selection is cleared (clicked empty space)
+    selectionCleared = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1667,8 +1669,12 @@ class SchematicView(QGraphicsView):
                     self._drag_start_pos = scene_pt
                     self._clicked_component_ref = None  # Clear component reference
                     if not (event.modifiers() & (Qt.ControlModifier | Qt.ShiftModifier)):
+                        had_selection = len(self._selected_components) > 0
                         self._selected_components.clear()
                         self._redraw_from_model()
+                        # Emit signal if we cleared a selection
+                        if had_selection:
+                            self.selectionCleared.emit()
             return  # Do NOT call super() - we've fully handled the event
         
         # Fallback: only if some future mode needs default behavior
@@ -1831,7 +1837,12 @@ class SchematicView(QGraphicsView):
 
     def mouseReleaseEvent(self, event):
         """Handle mouse release events."""
-        if self._mode == "select" and self._selection_rect_start is not None and self._selection_rect_item is not None:
+        # Check if we were doing a selection rectangle (before it gets cleared)
+        was_selection_rect = (self._mode == "select" and 
+                             self._selection_rect_start is not None and 
+                             self._selection_rect_item is not None)
+        
+        if was_selection_rect:
             # Finalize selection rectangle
             scene_pt = self.mapToScene(event.pos())
             rect = QRectF(self._selection_rect_start, scene_pt).normalized()
@@ -1854,6 +1865,13 @@ class SchematicView(QGraphicsView):
             self._redraw_from_model()
         
         if self._mode == "select":
+            # Emit componentClicked signal if a component was clicked (not dragged, not selection rectangle)
+            if (self._clicked_component_ref is not None and 
+                not self._is_dragging and 
+                not was_selection_rect):
+                # This was a click on a component, emit the signal
+                self.componentClicked.emit(self._clicked_component_ref)
+            
             self._drag_start_pos = None
             self._clicked_component_ref = None  # Clear component reference on release
             self._is_dragging = False  # Reset dragging state

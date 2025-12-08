@@ -32,8 +32,8 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFormLayout,
 )
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QShortcut, QKeySequence, QAction
+from PySide6.QtCore import Qt, QSize
+from PySide6.QtGui import QShortcut, QKeySequence, QAction, QIcon
 
 from app.schematic_view import SchematicView
 from app.component_properties_dialog import ComponentPropertiesDialog
@@ -91,6 +91,22 @@ def _build_node_to_net_mapping(model: SchematicModel, circuit) -> dict[str, list
                     node_to_nets[circuit_node].append(schematic_net)
     
     return node_to_nets
+
+
+def icon(name: str) -> QIcon:
+    """
+    Load an icon from the resources/icons directory.
+    
+    Args:
+        name: Icon filename (e.g., "tool_pointer.svg", "comp_resistor.svg")
+    
+    Returns:
+        QIcon object for the specified icon file
+    """
+    # Get the base directory (src/)
+    base_dir = Path(__file__).parent.parent
+    icon_path = base_dir / "resources" / "icons" / name
+    return QIcon(str(icon_path))
 
 
 def format_schematic_netlist(model: SchematicModel) -> str:
@@ -302,14 +318,9 @@ class MainWindow(QMainWindow):
         view_menu.addAction("Show Grid", self._stub_action("Toggle grid"))
         
         # Simulation menu
-        sim_menu = menubar.addMenu("Simulation")
-        sim_menu.addAction("Run DC", self.on_dc_analysis)
-        sim_menu.addAction("Run AC", self._stub_action("Run AC analysis"))
-        sim_menu.addAction("Run Transient", self._stub_action("Run transient analysis"))
-        sim_menu.addAction("Run Noise", self._stub_action("Run noise analysis"))
-        sim_menu.addAction("Run FFT/THD", self._stub_action("Run FFT/THD analysis"))
-        sim_menu.addSeparator()
-        sim_menu.addAction("Re-simulate Current", self.on_resimulate_current)
+        self.sim_menu = menubar.addMenu("Simulation")
+        # Note: Analysis actions are created in _setup_toolbars() and added here to share shortcuts
+        # These will be added after toolbar setup is complete
         
         # AI menu
         ai_menu = menubar.addMenu("AI")
@@ -328,151 +339,238 @@ class MainWindow(QMainWindow):
 
     def _setup_toolbars(self):
         """Create main toolbar with editing tools (left) and simulation controls (right)."""
-        # Main toolbar
+        # Main toolbar - Toolbar actions with SVG icons
         toolbar = QToolBar("Main Toolbar")
         toolbar.setMovable(False)
+        toolbar.setIconSize(QSize(20, 20))  # Set consistent icon size
         self.addToolBar(toolbar)
         
-        # Component placement buttons - create mapping first
-        self._placement_button_to_type = {}
+        # Component placement actions - create mapping first
+        self._placement_action_to_type = {}
         
         # Editing tools (left side)
-        self.btn_mode_select = QPushButton("Select")
-        self.btn_mode_select.setCheckable(True)
-        self.btn_mode_select.setChecked(True)
-        self.btn_mode_select.clicked.connect(self.on_mode_select)
-        toolbar.addWidget(self.btn_mode_select)
+        self.action_pointer = QAction(icon("tool_pointer.svg"), "Select", self)
+        self.action_pointer.setCheckable(True)
+        self.action_pointer.setChecked(True)
+        self.action_pointer.setToolTip("Select/Move")
+        self.action_pointer.triggered.connect(self.on_mode_select)
+        toolbar.addAction(self.action_pointer)
+        self.btn_mode_select = toolbar.widgetForAction(self.action_pointer)  # Keep reference for compatibility
         
-        self.btn_mode_wire = QPushButton("Wire")
-        self.btn_mode_wire.setCheckable(True)
-        self.btn_mode_wire.clicked.connect(self.on_mode_wire)
-        toolbar.addWidget(self.btn_mode_wire)
-        
-        toolbar.addSeparator()
-        
-        # Quick placement buttons
-        self.btn_place_resistor = QPushButton("R")
-        self.btn_place_resistor.setCheckable(True)
-        self.btn_place_resistor.setToolTip("Resistor")
-        self._placement_button_to_type[self.btn_place_resistor] = "R"
-        self.btn_place_resistor.clicked.connect(self.on_place_component_clicked)
-        toolbar.addWidget(self.btn_place_resistor)
-        
-        self.btn_place_capacitor = QPushButton("C")
-        self.btn_place_capacitor.setCheckable(True)
-        self.btn_place_capacitor.setToolTip("Capacitor")
-        self._placement_button_to_type[self.btn_place_capacitor] = "C"
-        self.btn_place_capacitor.clicked.connect(self.on_place_component_clicked)
-        toolbar.addWidget(self.btn_place_capacitor)
-        
-        btn_l = QPushButton("L")
-        btn_l.setToolTip("Inductor")
-        btn_l.clicked.connect(lambda: self._stub_action("Place Inductor")())
-        toolbar.addWidget(btn_l)
-        
-        btn_diode = QPushButton("D")
-        btn_diode.setToolTip("Diode")
-        btn_diode.clicked.connect(lambda: self._stub_action("Place Diode")())
-        toolbar.addWidget(btn_diode)
-        
-        btn_bjt = QPushButton("BJT")
-        btn_bjt.setToolTip("BJT Transistor")
-        btn_bjt.clicked.connect(lambda: self._stub_action("Place BJT")())
-        toolbar.addWidget(btn_bjt)
-        
-        btn_mosfet = QPushButton("MOS")
-        btn_mosfet.setToolTip("MOSFET")
-        btn_mosfet.clicked.connect(lambda: self._stub_action("Place MOSFET")())
-        toolbar.addWidget(btn_mosfet)
-        
-        self.btn_place_opamp = QPushButton("Op")
-        self.btn_place_opamp.setCheckable(True)
-        self.btn_place_opamp.setToolTip("Op-amp")
-        self._placement_button_to_type[self.btn_place_opamp] = "OPAMP"
-        self.btn_place_opamp.clicked.connect(self.on_place_component_clicked)
-        toolbar.addWidget(self.btn_place_opamp)
-        
-        self.btn_place_voltage = QPushButton("V")
-        self.btn_place_voltage.setCheckable(True)
-        self.btn_place_voltage.setToolTip("Voltage Source")
-        self._placement_button_to_type[self.btn_place_voltage] = "V"
-        self.btn_place_voltage.clicked.connect(self.on_place_component_clicked)
-        toolbar.addWidget(self.btn_place_voltage)
-        
-        self.btn_place_ground = QPushButton("GND")
-        self.btn_place_ground.setCheckable(True)
-        self.btn_place_ground.setToolTip("Ground")
-        self._placement_button_to_type[self.btn_place_ground] = "GND"
-        self.btn_place_ground.clicked.connect(self.on_place_component_clicked)
-        toolbar.addWidget(self.btn_place_ground)
-        
-        btn_net_label = QPushButton("Net")
-        btn_net_label.setToolTip("Net Label")
-        btn_net_label.clicked.connect(lambda: self._stub_action("Place Net Label")())
-        toolbar.addWidget(btn_net_label)
+        self.action_wire = QAction(icon("tool_wire.svg"), "Wire", self)
+        self.action_wire.setCheckable(True)
+        self.action_wire.setToolTip("Wire")
+        self.action_wire.setShortcut(QKeySequence("W"))  # Keyboard shortcut for tool selection
+        self.action_wire.triggered.connect(self.on_mode_wire)
+        toolbar.addAction(self.action_wire)
+        self.btn_mode_wire = toolbar.widgetForAction(self.action_wire)  # Keep reference for compatibility
         
         toolbar.addSeparator()
         
-        self.btn_rotate = QPushButton("Rotate")
-        self.btn_rotate.clicked.connect(self.on_rotate_component)
-        toolbar.addWidget(self.btn_rotate)
+        # Component placement actions
+        # Keyboard shortcuts for tool selection
+        self.action_place_resistor = QAction(icon("comp_resistor.svg"), "Resistor", self)
+        self.action_place_resistor.setCheckable(True)
+        self.action_place_resistor.setToolTip("Resistor")
+        self.action_place_resistor.setShortcut(QKeySequence("R"))  # Keyboard shortcut for tool selection
+        self._placement_action_to_type[self.action_place_resistor] = "R"
+        self.action_place_resistor.triggered.connect(self.on_place_component_clicked)
+        toolbar.addAction(self.action_place_resistor)
+        self.btn_place_resistor = toolbar.widgetForAction(self.action_place_resistor)
         
-        btn_flip = QPushButton("Flip")
-        btn_flip.clicked.connect(lambda: self._stub_action("Flip component")())
-        toolbar.addWidget(btn_flip)
+        self.action_place_capacitor = QAction(icon("comp_capacitor.svg"), "Capacitor", self)
+        self.action_place_capacitor.setCheckable(True)
+        self.action_place_capacitor.setToolTip("Capacitor")
+        self.action_place_capacitor.setShortcut(QKeySequence("C"))  # Keyboard shortcut for tool selection
+        self._placement_action_to_type[self.action_place_capacitor] = "C"
+        self.action_place_capacitor.triggered.connect(self.on_place_component_clicked)
+        toolbar.addAction(self.action_place_capacitor)
+        self.btn_place_capacitor = toolbar.widgetForAction(self.action_place_capacitor)
         
-        self.btn_delete = QPushButton("Del")
-        self.btn_delete.setCheckable(True)
-        self.btn_delete.setToolTip("Delete")
-        self.btn_delete.clicked.connect(self.on_delete_mode)
-        toolbar.addWidget(self.btn_delete)
+        self.action_place_inductor = QAction(icon("comp_inductor.svg"), "Inductor", self)
+        self.action_place_inductor.setCheckable(True)
+        self.action_place_inductor.setToolTip("Inductor")
+        self.action_place_inductor.setShortcut(QKeySequence("L"))  # Keyboard shortcut for tool selection
+        self._placement_action_to_type[self.action_place_inductor] = "L"
+        self.action_place_inductor.triggered.connect(self.on_place_component_clicked)
+        toolbar.addAction(self.action_place_inductor)
+        self.btn_place_inductor = toolbar.widgetForAction(self.action_place_inductor)
+        
+        self.action_place_diode = QAction(icon("comp_diode.svg"), "Diode", self)
+        self.action_place_diode.setCheckable(True)
+        self.action_place_diode.setToolTip("Diode")
+        self.action_place_diode.setShortcut(QKeySequence("D"))  # Keyboard shortcut for tool selection
+        self._placement_action_to_type[self.action_place_diode] = "D"
+        self.action_place_diode.triggered.connect(self.on_place_component_clicked)
+        toolbar.addAction(self.action_place_diode)
+        self.btn_place_diode = toolbar.widgetForAction(self.action_place_diode)
+        
+        self.action_place_bjt = QAction(icon("comp_bjt.svg"), "BJT", self)
+        self.action_place_bjt.setCheckable(True)
+        self.action_place_bjt.setToolTip("BJT Transistor")
+        self.action_place_bjt.setShortcut(QKeySequence("B"))  # Keyboard shortcut for tool selection
+        self._placement_action_to_type[self.action_place_bjt] = "BJT"
+        self.action_place_bjt.triggered.connect(self.on_place_component_clicked)
+        toolbar.addAction(self.action_place_bjt)
+        self.btn_place_bjt = toolbar.widgetForAction(self.action_place_bjt)
+        
+        self.action_place_mosfet = QAction(icon("comp_mosfet.svg"), "MOSFET", self)
+        self.action_place_mosfet.setCheckable(True)
+        self.action_place_mosfet.setToolTip("MOSFET")
+        self.action_place_mosfet.setShortcut(QKeySequence("M"))  # Keyboard shortcut for tool selection
+        self._placement_action_to_type[self.action_place_mosfet] = "MOSFET"
+        self.action_place_mosfet.triggered.connect(self.on_place_component_clicked)
+        toolbar.addAction(self.action_place_mosfet)
+        self.btn_place_mosfet = toolbar.widgetForAction(self.action_place_mosfet)
+        
+        self.action_place_opamp = QAction(icon("comp_opamp.svg"), "Op-amp", self)
+        self.action_place_opamp.setCheckable(True)
+        self.action_place_opamp.setToolTip("Op-amp")
+        self.action_place_opamp.setShortcut(QKeySequence("O"))  # Keyboard shortcut for tool selection
+        self._placement_action_to_type[self.action_place_opamp] = "OPAMP"
+        self.action_place_opamp.triggered.connect(self.on_place_component_clicked)
+        toolbar.addAction(self.action_place_opamp)
+        self.btn_place_opamp = toolbar.widgetForAction(self.action_place_opamp)
+        
+        self.action_place_voltage = QAction(icon("comp_vsource.svg"), "Voltage Source", self)
+        self.action_place_voltage.setCheckable(True)
+        self.action_place_voltage.setToolTip("Voltage Source")
+        self.action_place_voltage.setShortcut(QKeySequence("V"))  # Keyboard shortcut for tool selection
+        self._placement_action_to_type[self.action_place_voltage] = "V"
+        self.action_place_voltage.triggered.connect(self.on_place_component_clicked)
+        toolbar.addAction(self.action_place_voltage)
+        self.btn_place_voltage = toolbar.widgetForAction(self.action_place_voltage)
+        
+        self.action_place_current = QAction(icon("comp_isource.svg"), "Current Source", self)
+        self.action_place_current.setCheckable(True)
+        self.action_place_current.setToolTip("Current Source")
+        self._placement_action_to_type[self.action_place_current] = "I"
+        self.action_place_current.triggered.connect(self.on_place_component_clicked)
+        toolbar.addAction(self.action_place_current)
+        self.btn_place_current = toolbar.widgetForAction(self.action_place_current)
+        
+        self.action_place_ground = QAction(icon("comp_ground.svg"), "Ground", self)
+        self.action_place_ground.setCheckable(True)
+        self.action_place_ground.setToolTip("Ground")
+        self.action_place_ground.setShortcut(QKeySequence("G"))  # Keyboard shortcut for tool selection
+        self._placement_action_to_type[self.action_place_ground] = "GND"
+        self.action_place_ground.triggered.connect(self.on_place_component_clicked)
+        toolbar.addAction(self.action_place_ground)
+        self.btn_place_ground = toolbar.widgetForAction(self.action_place_ground)
+        
+        self.action_place_net_label = QAction(icon("tool_net_label.svg"), "Net Label", self)
+        self.action_place_net_label.setCheckable(True)
+        self.action_place_net_label.setToolTip("Net Label")
+        self.action_place_net_label.setShortcut(QKeySequence("N"))  # Keyboard shortcut for tool selection
+        self.action_place_net_label.triggered.connect(lambda: self._stub_action("Place Net Label")())
+        toolbar.addAction(self.action_place_net_label)
+        self.btn_place_net_label = toolbar.widgetForAction(self.action_place_net_label)
         
         toolbar.addSeparator()
         
-        # Store component placement buttons for mode management
+        self.action_rotate = QAction(icon("tool_rotate.svg"), "Rotate", self)
+        self.action_rotate.setToolTip("Rotate Component")
+        self.action_rotate.triggered.connect(self.on_rotate_component)
+        toolbar.addAction(self.action_rotate)
+        self.btn_rotate = toolbar.widgetForAction(self.action_rotate)
+        
+        action_flip = QAction(icon("tool_flip.svg"), "Flip", self)
+        action_flip.setToolTip("Flip Component")
+        action_flip.triggered.connect(lambda: self._stub_action("Flip component")())
+        toolbar.addAction(action_flip)
+        
+        self.action_delete = QAction(icon("tool_delete.svg"), "Delete", self)
+        self.action_delete.setCheckable(True)
+        self.action_delete.setToolTip("Delete")
+        self.action_delete.triggered.connect(self.on_delete_mode)
+        toolbar.addAction(self.action_delete)
+        self.btn_delete = toolbar.widgetForAction(self.action_delete)
+        
+        toolbar.addSeparator()
+        
+        # Store component placement actions for mode management (keep compatibility with existing code)
         self._placement_buttons = [
             self.btn_place_resistor,
             self.btn_place_capacitor,
+            self.btn_place_inductor,
+            self.btn_place_diode,
+            self.btn_place_bjt,
+            self.btn_place_mosfet,
             self.btn_place_opamp,
             self.btn_place_voltage,
+            self.btn_place_current,
             self.btn_place_ground,
+        ]
+        # Also store actions for easier access
+        self._placement_actions = [
+            self.action_place_resistor,
+            self.action_place_capacitor,
+            self.action_place_inductor,
+            self.action_place_diode,
+            self.action_place_bjt,
+            self.action_place_mosfet,
+            self.action_place_opamp,
+            self.action_place_voltage,
+            self.action_place_current,
+            self.action_place_ground,
         ]
         
         # Simulation & AI controls (right side of toolbar)
         toolbar.addSeparator()
         toolbar.addWidget(QLabel("|"))  # Visual separator
         
-        btn_dc = QPushButton("DC")
-        btn_dc.clicked.connect(self.on_dc_analysis)
-        toolbar.addWidget(btn_dc)
+        # Keyboard shortcuts for analyses
+        self.action_run_dc = QAction(icon("sim_run_dc.svg"), "Run DC", self)
+        self.action_run_dc.setToolTip("Run DC Analysis")
+        self.action_run_dc.setShortcut(QKeySequence("Ctrl+Alt+D"))  # Keyboard shortcut for analysis
+        self.action_run_dc.triggered.connect(self.on_dc_analysis)
+        toolbar.addAction(self.action_run_dc)
         
-        btn_ac = QPushButton("AC")
-        btn_ac.clicked.connect(lambda: self._stub_action("Run AC")())
-        toolbar.addWidget(btn_ac)
+        self.action_run_ac = QAction(icon("sim_run_ac.svg"), "Run AC", self)
+        self.action_run_ac.setToolTip("Run AC Analysis")
+        self.action_run_ac.setShortcut(QKeySequence("Ctrl+Alt+A"))  # Keyboard shortcut for analysis
+        self.action_run_ac.triggered.connect(self.on_ac_analysis)
+        toolbar.addAction(self.action_run_ac)
         
-        btn_transient = QPushButton("Trans")
-        btn_transient.setToolTip("Transient")
-        btn_transient.clicked.connect(lambda: self._stub_action("Run Transient")())
-        toolbar.addWidget(btn_transient)
+        self.action_run_transient = QAction(icon("sim_transient.svg"), "Run Transient", self)
+        self.action_run_transient.setToolTip("Run Transient Analysis")
+        self.action_run_transient.setShortcut(QKeySequence("Ctrl+Alt+T"))  # Keyboard shortcut for analysis
+        self.action_run_transient.triggered.connect(self.on_transient_analysis)
+        toolbar.addAction(self.action_run_transient)
         
-        btn_noise = QPushButton("Noise")
-        btn_noise.clicked.connect(lambda: self._stub_action("Run Noise")())
-        toolbar.addWidget(btn_noise)
+        self.action_run_noise = QAction(icon("sim_noise.svg"), "Run Noise", self)
+        self.action_run_noise.setToolTip("Run Noise Analysis")
+        self.action_run_noise.setShortcut(QKeySequence("Ctrl+Alt+N"))  # Keyboard shortcut for analysis
+        self.action_run_noise.triggered.connect(self.on_noise_analysis)
+        toolbar.addAction(self.action_run_noise)
         
-        btn_fft = QPushButton("FFT")
-        btn_fft.clicked.connect(lambda: self._stub_action("Run FFT/THD")())
-        toolbar.addWidget(btn_fft)
+        self.action_run_fft = QAction(icon("sim_fft.svg"), "Run FFT/THD", self)
+        self.action_run_fft.setToolTip("Run FFT/THD Analysis")
+        self.action_run_fft.setShortcut(QKeySequence("Ctrl+Alt+F"))  # Keyboard shortcut for analysis
+        self.action_run_fft.triggered.connect(self.on_fft_analysis)
+        toolbar.addAction(self.action_run_fft)
         
         toolbar.addSeparator()
         
-        btn_ai_opt = QPushButton("AI Optimize")
-        btn_ai_opt.clicked.connect(lambda: self._stub_action("AI Optimize")())
-        toolbar.addWidget(btn_ai_opt)
+        self.action_ai_optimize = QAction(icon("ai_optimize.svg"), "AI Optimize", self)
+        self.action_ai_optimize.setToolTip("AI Optimize Circuit")
+        self.action_ai_optimize.triggered.connect(lambda: self._stub_action("AI Optimize")())
+        toolbar.addAction(self.action_ai_optimize)
         
-        btn_ai_explain = QPushButton("AI Explain")
-        btn_ai_explain.setToolTip("AI Explain Circuit")
-        btn_ai_explain.clicked.connect(lambda: self._stub_action("AI Explain Circuit")())
-        toolbar.addWidget(btn_ai_explain)
+        self.action_ai_chat = QAction(icon("ai_chat.svg"), "AI Explain", self)
+        self.action_ai_chat.setToolTip("AI Explain Circuit")
+        self.action_ai_chat.triggered.connect(lambda: self._stub_action("AI Explain Circuit")())
+        toolbar.addAction(self.action_ai_chat)
+        
+        # Add analysis actions to Simulation menu (after they're created)
+        # This ensures shortcuts are shown in the menu
+        self.sim_menu.addAction(self.action_run_dc)
+        self.sim_menu.addAction(self.action_run_ac)
+        self.sim_menu.addAction(self.action_run_transient)
+        self.sim_menu.addAction(self.action_run_noise)
+        self.sim_menu.addAction(self.action_run_fft)
+        self.sim_menu.addSeparator()
+        self.sim_menu.addAction("Re-simulate Current", self.on_resimulate_current)
 
     def _setup_central_widget(self):
         """Set SchematicView as the central widget."""
@@ -481,6 +579,8 @@ class MainWindow(QMainWindow):
         
         # React to clicks on components in the schematic
         self.schematic_view.componentClicked.connect(self.on_component_clicked)
+        # React to selection being cleared
+        self.schematic_view.selectionCleared.connect(self._on_selection_cleared)
 
     def _setup_left_dock(self):
         """Create left dock widget for Component Library."""
@@ -556,11 +656,40 @@ class MainWindow(QMainWindow):
         props_widget = QWidget()
         props_layout = QVBoxLayout(props_widget)
         
-        self.properties_info = QLabel("No component selected")
-        self.properties_info.setWordWrap(True)
-        props_layout.addWidget(self.properties_info)
+        # Properties form for editable fields
+        self.properties_form = QFormLayout()
         
-        self.btn_properties_dialog = QPushButton("Edit Properties...")
+        # Reference (read-only label)
+        self.prop_ref_label = QLabel("No component selected")
+        self.properties_form.addRow("Reference:", self.prop_ref_label)
+        
+        # Type (read-only label)
+        self.prop_type_label = QLabel("—")
+        self.properties_form.addRow("Type:", self.prop_type_label)
+        
+        # Value (editable spinbox)
+        self.prop_value_edit = QDoubleSpinBox()
+        self.prop_value_edit.setRange(1e-12, 1e12)
+        self.prop_value_edit.setDecimals(6)
+        self.prop_value_edit.setSuffix("")
+        self.prop_value_edit.setEnabled(False)
+        self.prop_value_edit.valueChanged.connect(self._on_property_value_changed)
+        self.properties_form.addRow("Value:", self.prop_value_edit)
+        
+        # Net connections (read-only)
+        self.prop_nets_label = QLabel("—")
+        self.prop_nets_label.setWordWrap(True)
+        self.properties_form.addRow("Net connections:", self.prop_nets_label)
+        
+        # Extra parameters (read-only for now, can be made editable later)
+        self.prop_extra_label = QLabel("—")
+        self.prop_extra_label.setWordWrap(True)
+        self.properties_form.addRow("Extra parameters:", self.prop_extra_label)
+        
+        props_layout.addLayout(self.properties_form)
+        
+        # Advanced properties button (optional - for complex edits)
+        self.btn_properties_dialog = QPushButton("Advanced Properties...")
         self.btn_properties_dialog.clicked.connect(self._on_open_properties_dialog)
         self.btn_properties_dialog.setEnabled(False)
         props_layout.addWidget(self.btn_properties_dialog)
@@ -693,25 +822,25 @@ class MainWindow(QMainWindow):
         if component_type:
             # Activate placement mode
             self.log(f"Component library: Selected '{text}' - activating placement mode")
-            # Uncheck all placement buttons
-            for btn in self._placement_buttons:
-                btn.setChecked(False)
-            self.btn_mode_select.setChecked(False)
-            self.btn_mode_wire.setChecked(False)
+            # Uncheck all placement actions
+            for act in self._placement_actions:
+                act.setChecked(False)
+            self.action_pointer.setChecked(False)
+            self.action_wire.setChecked(False)
             
-            # Find and activate the corresponding button
-            for btn, ctype in self._placement_button_to_type.items():
+            # Find and activate the corresponding action
+            for act, ctype in self._placement_action_to_type.items():
                 if ctype == component_type:
-                    btn.setChecked(True)
+                    act.setChecked(True)
                     self.schematic_view.set_placement_mode(component_type)
                     return
             
-            # If no button found, activate placement mode directly
-            if component_type in ["R", "C", "OPAMP", "V", "GND"]:
-                # These have buttons, already handled above
+            # If no action found, activate placement mode directly
+            if component_type in ["R", "C", "OPAMP", "V", "I", "GND"]:
+                # These have actions, already handled above
                 pass
             else:
-                # For components without toolbar buttons, activate placement mode directly
+                # For components without toolbar actions, activate placement mode directly
                 self.schematic_view.set_placement_mode(component_type)
                 self.log(f"Placement mode activated for {component_type}")
         else:
@@ -968,9 +1097,7 @@ class MainWindow(QMainWindow):
 
         if schematic_comp is None:
             # Clear properties panel if component not found
-            if hasattr(self, "properties_info"):
-                self.properties_info.setText("Component not found")
-                self.btn_properties_dialog.setEnabled(False)
+            self._clear_properties_panel("Component not found")
             return
 
         # Update properties panel with component info
@@ -980,30 +1107,114 @@ class MainWindow(QMainWindow):
         if hasattr(self, "btn_properties_dialog"):
             self.btn_properties_dialog.setEnabled(True)
 
+    def _on_selection_cleared(self):
+        """Handle when selection is cleared in schematic view."""
+        self.selected_component_ref = None
+        self._clear_properties_panel()
+    
+    def _clear_properties_panel(self, message: str = "No component selected"):
+        """Clear the properties panel and show a message."""
+        if not hasattr(self, "prop_ref_label"):
+            return
+        
+        self.prop_ref_label.setText(message)
+        self.prop_type_label.setText("—")
+        self.prop_value_edit.blockSignals(True)
+        self.prop_value_edit.setValue(0.0)
+        self.prop_value_edit.setEnabled(False)
+        self.prop_value_edit.blockSignals(False)
+        self.prop_nets_label.setText("—")
+        self.prop_extra_label.setText("—")
+        if hasattr(self, "btn_properties_dialog"):
+            self.btn_properties_dialog.setEnabled(False)
+    
+    def _on_property_value_changed(self, new_value: float):
+        """Handle property value changes from the properties panel."""
+        if not self.selected_component_ref:
+            return
+        
+        # Find component in schematic model
+        schematic_comp = None
+        if hasattr(self, "schematic_view") and self.schematic_view.model:
+            for comp in self.schematic_view.model.components:
+                if comp.ref == self.selected_component_ref:
+                    schematic_comp = comp
+                    break
+        
+        if schematic_comp is None:
+            return
+        
+        # Update the component value
+        schematic_comp.value = new_value
+        
+        # Update the schematic view to reflect the change
+        if hasattr(self, "schematic_view"):
+            self.schematic_view._redraw_from_model()
+        
+        # Log the change
+        self.log(f"{self.selected_component_ref} value updated to {new_value}")
+    
     def _update_properties_panel(self, comp):
         """Update the properties panel with component information."""
-        if not hasattr(self, "properties_info"):
+        if not hasattr(self, "prop_ref_label"):
             return
-            
-        info_lines = []
-        info_lines.append(f"<b>Reference:</b> {comp.ref}")
-        info_lines.append(f"<b>Type:</b> {comp.ctype}")
-        info_lines.append(f"<b>Value:</b> {comp.value}")
         
-        # Show pin information
+        # Update reference
+        self.prop_ref_label.setText(comp.ref)
+        
+        # Update type
+        self.prop_type_label.setText(comp.ctype)
+        
+        # Update value (temporarily disable signal to prevent recursive updates)
+        self.prop_value_edit.blockSignals(True)
+        self.prop_value_edit.setValue(float(comp.value) if comp.value is not None else 0.0)
+        
+        # Set appropriate suffix and range based on component type
+        if comp.ctype == "R":
+            # Resistor: ohms
+            self.prop_value_edit.setSuffix(" Ω")
+            self.prop_value_edit.setRange(1e-6, 1e12)
+        elif comp.ctype == "C":
+            # Capacitor: farads
+            self.prop_value_edit.setSuffix(" F")
+            self.prop_value_edit.setRange(1e-15, 1.0)
+        elif comp.ctype == "L":
+            # Inductor: henries
+            self.prop_value_edit.setSuffix(" H")
+            self.prop_value_edit.setRange(1e-12, 1.0)
+        elif comp.ctype == "V":
+            # Voltage source: volts
+            self.prop_value_edit.setSuffix(" V")
+            self.prop_value_edit.setRange(-1000.0, 1000.0)
+        elif comp.ctype == "I":
+            # Current source: amperes
+            self.prop_value_edit.setSuffix(" A")
+            self.prop_value_edit.setRange(-100.0, 100.0)
+        else:
+            self.prop_value_edit.setSuffix("")
+            self.prop_value_edit.setRange(1e-12, 1e12)
+        
+        self.prop_value_edit.setEnabled(True)
+        self.prop_value_edit.blockSignals(False)
+        
+        # Update net connections
         if comp.pins:
-            info_lines.append("<b>Net connections:</b>")
+            net_lines = []
             for pin in comp.pins:
                 net_name = pin.net if pin.net else "No net"
-                info_lines.append(f"  Pin {pin.name}: {net_name}")
+                net_lines.append(f"Pin {pin.name}: {net_name}")
+            self.prop_nets_label.setText("<br>".join(net_lines))
+        else:
+            self.prop_nets_label.setText("No pins")
         
-        # Show extra properties
+        # Update extra parameters
         if comp.extra:
-            info_lines.append("<b>Extra parameters:</b>")
+            extra_lines = []
             for key, value in comp.extra.items():
-                info_lines.append(f"  {key}: {value}")
-        
-        self.properties_info.setText("<br>".join(info_lines))
+                extra_lines.append(f"{key}: {value}")
+            self.prop_extra_label.setText("<br>".join(extra_lines))
+        else:
+            self.prop_extra_label.setText("None")
         
     def _on_edit_properties_from_panel(self):
         """Open properties dialog for the currently selected component."""
@@ -1209,8 +1420,8 @@ class MainWindow(QMainWindow):
         self.log("Re-simulation done.")
 
     def _update_mode_buttons(self, select_active: bool):
-        self.btn_mode_select.setChecked(select_active)
-        self.btn_mode_wire.setChecked(not select_active)
+        self.action_pointer.setChecked(select_active)
+        self.action_wire.setChecked(not select_active)
 
     def on_mode_select(self):
         self._update_mode_buttons(True)
@@ -1222,99 +1433,95 @@ class MainWindow(QMainWindow):
         self.schematic_view.set_mode("wire")
 
     def on_place_component_clicked(self):
-        """Handle component placement button click."""
-        sender_btn = self.sender()
-        if sender_btn is None:
+        """Handle component placement action trigger."""
+        sender_action = self.sender()
+        if sender_action is None:
             return
         
-        component_type = self._placement_button_to_type.get(sender_btn)
+        component_type = self._placement_action_to_type.get(sender_action)
         if component_type is None:
             return
         
-        # Uncheck all other placement buttons
-        for btn in self._placement_buttons:
-            if btn != sender_btn:
-                btn.setChecked(False)
+        # Uncheck all other placement actions
+        for action in self._placement_actions:
+            if action != sender_action:
+                action.setChecked(False)
         
-        # Uncheck mode buttons
-        self.btn_mode_select.setChecked(False)
-        self.btn_mode_wire.setChecked(False)
+        # Uncheck mode actions
+        self.action_pointer.setChecked(False)
+        self.action_wire.setChecked(False)
         
         # Set placement mode in schematic view
-        if sender_btn.isChecked():
+        if sender_action.isChecked():
             self.schematic_view.set_placement_mode(component_type)
         else:
             # If unchecking, go back to select mode
-            self.btn_mode_select.setChecked(True)
+            self.action_pointer.setChecked(True)
             self.schematic_view.set_mode("select")
 
     def _setup_keyboard_shortcuts(self):
         """Setup keyboard shortcuts for component placement and modes."""
-        # Component placement shortcuts
-        QShortcut(QKeySequence("R"), self, activated=lambda: self._place_component_by_key("R"))
-        QShortcut(QKeySequence("C"), self, activated=lambda: self._place_component_by_key("C"))
-        QShortcut(QKeySequence("O"), self, activated=lambda: self._place_component_by_key("OPAMP"))
-        QShortcut(QKeySequence("V"), self, activated=lambda: self._place_component_by_key("V"))
-        QShortcut(QKeySequence("I"), self, activated=lambda: self._place_component_by_key("I"))
-        QShortcut(QKeySequence("G"), self, activated=lambda: self._place_component_by_key("GND"))
-        
-        # Wire mode shortcut
-        QShortcut(QKeySequence("W"), self, activated=self._activate_wire_mode)
+        # Note: Tool selection shortcuts are now set directly on QActions using setShortcut()
+        # This method remains for Delete/Escape shortcuts and any future non-action shortcuts
         
         # Delete/Escape to reset mode
         QShortcut(QKeySequence("Delete"), self, activated=self._reset_mode)
         QShortcut(QKeySequence("Escape"), self, activated=self._reset_mode)
+        
+        # Keyboard shortcut for current source (not in rules.md but useful to keep)
+        if hasattr(self, 'action_place_current'):
+            self.action_place_current.setShortcut(QKeySequence("I"))
     
     def _place_component_by_key(self, component_type: str):
         """Place a component using keyboard shortcut."""
-        # Find the corresponding button
-        button = None
-        for btn, ctype in self._placement_button_to_type.items():
+        # Find the corresponding action
+        action = None
+        for act, ctype in self._placement_action_to_type.items():
             if ctype == component_type:
-                button = btn
+                action = act
                 break
         
-        if button:
-            # Uncheck all other buttons first
-            for btn in self._placement_buttons:
-                if btn != button:
-                    btn.setChecked(False)
-            self.btn_mode_select.setChecked(False)
-            self.btn_mode_wire.setChecked(False)
+        if action:
+            # Uncheck all other actions first
+            for act in self._placement_actions:
+                if act != action:
+                    act.setChecked(False)
+            self.action_pointer.setChecked(False)
+            self.action_wire.setChecked(False)
             
-            # Toggle the button (this will trigger on_place_component_clicked)
-            button.setChecked(True)
-            button.clicked.emit()
+            # Toggle the action (this will trigger on_place_component_clicked)
+            action.setChecked(True)
+            action.trigger()
             
             # Focus the schematic view so clicks work
             self.schematic_view.setFocus()
     
     def _activate_wire_mode(self):
         """Activate wire mode using keyboard shortcut."""
-        # Uncheck all placement buttons
-        for btn in self._placement_buttons:
-            btn.setChecked(False)
-        self.btn_mode_select.setChecked(False)
+        # Uncheck all placement actions
+        for act in self._placement_actions:
+            act.setChecked(False)
+        self.action_pointer.setChecked(False)
         
         # Activate wire mode
-        self.btn_mode_wire.setChecked(True)
-        self.btn_mode_wire.clicked.emit()
+        self.action_wire.setChecked(True)
+        self.action_wire.trigger()
         
         # Focus the schematic view
         self.schematic_view.setFocus()
     
     def _reset_mode(self):
         """Reset to select mode (unselect current mode)."""
-        # Uncheck all placement buttons
-        for btn in self._placement_buttons:
-            btn.setChecked(False)
-        self.btn_delete.setChecked(False)
+        # Uncheck all placement actions
+        for act in self._placement_actions:
+            act.setChecked(False)
+        self.action_delete.setChecked(False)
         
-        # Uncheck mode buttons
-        self.btn_mode_wire.setChecked(False)
+        # Uncheck mode actions
+        self.action_wire.setChecked(False)
         
         # Activate select mode
-        self.btn_mode_select.setChecked(True)
+        self.action_pointer.setChecked(True)
         if hasattr(self, 'schematic_view'):
             self.schematic_view.set_mode("select")
         
@@ -1323,24 +1530,24 @@ class MainWindow(QMainWindow):
             self.schematic_view.setFocus()
 
     def on_delete_mode(self):
-        """Handle delete tool button click."""
+        """Handle delete tool action trigger."""
         if self.sender().isChecked():
-            # Uncheck all other buttons
-            for btn in self._placement_buttons:
-                btn.setChecked(False)
-            self.btn_mode_select.setChecked(False)
-            self.btn_mode_wire.setChecked(False)
+            # Uncheck all other actions
+            for act in self._placement_actions:
+                act.setChecked(False)
+            self.action_pointer.setChecked(False)
+            self.action_wire.setChecked(False)
             self.schematic_view.set_mode("delete")
         else:
             # If unchecking, go back to select mode
-            self.btn_mode_select.setChecked(True)
+            self.action_pointer.setChecked(True)
             self.schematic_view.set_mode("select")
 
     def _clear_placement_buttons(self):
-        """Uncheck all placement buttons."""
-        for btn in self._placement_buttons:
-            btn.setChecked(False)
-        self.btn_delete.setChecked(False)
+        """Uncheck all placement actions."""
+        for act in self._placement_actions:
+            act.setChecked(False)
+        self.action_delete.setChecked(False)
 
     def on_simulate_from_schematic(self) -> None:
         """
@@ -1569,6 +1776,26 @@ class MainWindow(QMainWindow):
                     self.log(f"DEBUG: Net {net}: {volt:.3f}V")
             
             self.schematic_view.set_dc_voltages(schematic_voltages)
+    
+    def on_ac_analysis(self) -> None:
+        """Run AC analysis on the current schematic."""
+        QMessageBox.information(self, "Not Implemented", "Run AC analysis is not implemented yet.")
+        print("TODO: Run AC analysis")
+    
+    def on_transient_analysis(self) -> None:
+        """Run Transient analysis on the current schematic."""
+        QMessageBox.information(self, "Not Implemented", "Run Transient analysis is not implemented yet.")
+        print("TODO: Run Transient analysis")
+    
+    def on_noise_analysis(self) -> None:
+        """Run Noise analysis on the current schematic."""
+        QMessageBox.information(self, "Not Implemented", "Run Noise analysis is not implemented yet.")
+        print("TODO: Run Noise analysis")
+    
+    def on_fft_analysis(self) -> None:
+        """Run FFT/THD analysis on the current schematic."""
+        QMessageBox.information(self, "Not Implemented", "Run FFT/THD analysis is not implemented yet.")
+        print("TODO: Run FFT/THD analysis")
 
 
 def main() -> None:

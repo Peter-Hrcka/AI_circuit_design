@@ -127,7 +127,7 @@ The main GUI should follow a professional EDA / CAD layout with dockable panels:
     - Wire tool
     - Quick placement for: Resistor (R), Capacitor (C), Inductor (L), Diode (D)
     - Quick placement for: BJT, MOSFET, Op-amp
-    - Quick placement for: Voltage Source, Ground
+    - Quick placement for: Voltage Source, Current Source, Ground
     - Net label tool
     - Rotate, Flip, Delete
   - Simulation & AI controls (right side):
@@ -185,6 +185,40 @@ Cursor MUST treat this layout as the target structure when adding or modifying G
 - Use QDockWidget for side and bottom panels.
 - Use QGraphicsView for the schematic canvas.
 - Keep toolbar/buttons and panels aligned with these responsibilities.
+
+
+### 2.3 Keyboard Shortcuts (Cursor MUST implement and preserve)
+
+The GUI must support the following keyboard shortcuts for tool / analysis selection:
+
+**Tool selection shortcuts (single key, no modifier):**
+- `W` → Activate **Wire** tool.
+- `R` → Activate **Resistor placement** tool.
+- `C` → Activate **Capacitor placement** tool.
+- `L` → Activate **Inductor placement** tool.
+- `D` → Activate **Diode placement** tool.
+- `B` → Activate **BJT transistor placement** tool.
+- `M` → Activate **MOSFET placement** tool.
+- `O` → Activate **Op-amp placement** tool.
+- `V` → Activate **Voltage source placement** tool.
+- `G` → Activate **Ground symbol placement** tool.
+- `N` → Activate **Net label** tool.
+
+Pressing these keys should select the corresponding mode/tool in the schematic editor, exactly as if the user clicked the matching toolbar button. They MUST NOT create components instantly at the current mouse position; they only change the active placement mode.
+
+**Analysis / simulation shortcuts (with modifiers):**
+- `Ctrl + Alt + D` → Run **DC analysis** (or open DC analysis dialog; currently may be a stub).
+- `Ctrl + Alt + A` → Run **AC analysis**.
+- `Ctrl + Alt + T` → Run **Transient analysis**.
+- `Ctrl + Alt + N` → Run **Noise analysis**.
+- `Ctrl + Alt + F` → Run **FFT / THD analysis**.
+
+These shortcuts must trigger the same slots as the corresponding toolbar/menu actions (Run DC, Run AC, etc.). If those actions are not implemented yet, the slots may show a “Not implemented yet” message, but the shortcut bindings must still exist and be kept consistent.
+
+Cursor must:
+- Use Qt’s `QAction.setShortcut(QKeySequence("..."))` (or equivalent) to register these shortcuts.
+- Ensure shortcuts are attached to actions that live on `QMainWindow` (so they are active when the main window has focus).
+- Avoid conflicting shortcuts and do not override these mappings in future edits.
 
 ---
 
