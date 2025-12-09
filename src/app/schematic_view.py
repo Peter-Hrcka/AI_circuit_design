@@ -2,11 +2,10 @@
 
 from PySide6.QtWidgets import QGraphicsView, QGraphicsScene, QGraphicsLineItem, QGraphicsEllipseItem, QGraphicsTextItem, QGraphicsPolygonItem, QGraphicsRectItem
 from PySide6.QtSvgWidgets import QGraphicsSvgItem
-from PySide6.QtGui import QPen, QPainter, QBrush, QColor, QPolygonF, QTransform
+from PySide6.QtGui import QPen, QPainter, QBrush, QColor, QPolygonF, QTransform, QWheelEvent
 from PySide6.QtCore import Qt, QRectF, QPointF, Signal
 from PySide6.QtSvg import QSvgRenderer
 from pathlib import Path
-from math import atan2, degrees, sqrt
 
 from core.schematic_model import (
     SchematicModel,
@@ -70,7 +69,7 @@ class SchematicView(QGraphicsView):
         self._component_original_pens: dict = {}
         
         # Grid settings
-        self._grid_size = 10.0  # pixels
+        self._grid_size = 8.0  # pixels
         self._snap_to_grid_enabled = True
         self._show_grid = True  # Show grid background
         
@@ -368,11 +367,7 @@ class SchematicView(QGraphicsView):
     def _draw_component_svg(self, comp: SchematicComponent):
         """
         Draw a component using its SVG symbol.
-        
-        For 2-pin components (R, C, L, D, V, I): Anchors SVG left connection point to pin1
-        and right connection point to pin2, scaling and rotating to match pin positions.
-        
-        For multi-pin components: Centers symbol on pin centroid (snapped to grid).
+        Handles rotation, pin positions, and symbol scaling.
         """
         scene = self.scene()
         
@@ -399,141 +394,129 @@ class SchematicView(QGraphicsView):
             self._draw_component_fallback(comp)
             return
         
+        # Calculate component bounds and center from pins
         if not comp.pins:
             return
         
-        # Get SVG viewBox
-        viewbox = renderer.viewBoxF()
-        if not viewbox.isValid():
-            viewbox = QRectF(0, 0, 64, 64)
+        # For components with pins, calculate bounding box
+        pin_x_coords = [p.x for p in comp.pins]
+        pin_y_coords = [p.y for p in comp.pins]
+        min_x, max_x = min(pin_x_coords), max(pin_x_coords)
+        min_y, max_y = min(pin_y_coords), max(pin_y_coords)
         
-        base_w = viewbox.width()
-        base_h = viewbox.height()
+        # Component center (used for symbol placement)
+        center_x = (min_x + max_x) / 2
+        center_y = (min_y + max_y) / 2
+        
+        # Determine symbol size - base on pin spacing or default
+        if len(comp.pins) >= 2:
+            # For 2-pin components, use distance between pins as reference
+            pin1 = comp.pins[0]
+            pin2 = comp.pins[1]
+            dx = pin2.x - pin1.x
+            dy = pin2.y - pin1.y
+            pin_distance = (dx**2 + dy**2)**0.5
+            
+            # Symbol size: match typical component size (50-60 pixels)
+            symbol_size = max(pin_distance * 0.6, 40.0)
+        else:
+            # For single-pin (GND) or multi-pin (op-amp), use default size
+            symbol_size = 50.0
+        
+        # Get SVG viewBox to maintain aspect ratio
+        viewbox = renderer.viewBoxF()
+        if viewbox.isValid():
+            svg_aspect = viewbox.height() / viewbox.width() if viewbox.width() > 0 else 1.0
+        else:
+            svg_aspect = 1.0
+        
+        # Calculate symbol dimensions
+        # For proper alignment, we need to calculate symbol size based on actual pin positions
+        # and ensure SVG pin coordinates map correctly to canvas pin positions
+        if len(comp.pins) >= 2:
+            # Calculate bounding box of pins
+            pin_min_x = min(p.x for p in comp.pins)
+            pin_max_x = max(p.x for p in comp.pins)
+            pin_min_y = min(p.y for p in comp.pins)
+            pin_max_y = max(p.y for p in comp.pins)
+            
+            pin_width = pin_max_x - pin_min_x
+            pin_height = pin_max_y - pin_min_y
+            
+            # SVG is 64x64, so we need to scale it to match pin spacing
+            # If pins span the full width/height of SVG (0 to 64), use pin span directly
+            # For 2-pin horizontal: SVG pins at (0,32) and (64,32), so width should match pin distance
+            # For 2-pin vertical: SVG pins at (32,0) and (32,64), so height should match pin distance
+            
+            if comp.ctype in ("R", "C", "L", "D"):
+                # Horizontal 2-pin components: SVG pins at (0,32) and (64,32) - 64 pixels apart
+                # Symbol width should match pin distance exactly to align pins
+                symbol_width = pin_width  # Use exact pin span
+                symbol_height = symbol_width * svg_aspect
+            elif comp.ctype in ("V", "I"):
+                # Vertical 2-pin components: SVG pins at (32,0) and (32,64) - 64 pixels apart
+                # Symbol height should match pin distance exactly to align pins
+                symbol_height = pin_height  # Use exact pin span
+                symbol_width = symbol_height / svg_aspect if svg_aspect > 0 else symbol_height
+            elif comp.ctype in ("Q", "M"):
+                # 3-4 pin components: SVG pins at (0,32), (32,0), (32,64), (64,32)
+                # Pins span 64 pixels in both directions (from -32 to +32 from center)
+                # Symbol should be square, size should match the actual pin span
+                max_pin_span = max(pin_width, pin_height)
+                symbol_size = max_pin_span  # Use exact pin span
+                symbol_width = symbol_size
+                symbol_height = symbol_size
+            elif comp.ctype == "G":
+                # VCCS: 4 pins at edges - same as transistors
+                max_pin_span = max(pin_width, pin_height)
+                symbol_size = max_pin_span  # Use exact pin span
+                symbol_width = symbol_size
+                symbol_height = symbol_size
+            elif comp.ctype == "OPAMP":
+                # Op-amp: In+ at (0,24), In- at (0,40), Out at (64,32)
+                # Pins span 64 pixels horizontally
+                symbol_width = pin_width  # Use exact pin span
+                symbol_height = symbol_width * svg_aspect
+            else:
+                # Default: use pin distance
+                pin1 = comp.pins[0]
+                pin2 = comp.pins[1]
+                dx = pin2.x - pin1.x
+                dy = pin2.y - pin1.y
+                length = (dx**2 + dy**2)**0.5
+                symbol_width = max(length, 64.0)
+                symbol_height = symbol_width * svg_aspect
+        else:
+            # For op-amps and other multi-pin, use default size
+            symbol_width = symbol_size
+            symbol_height = symbol_size * svg_aspect
         
         # Create SVG item
         svg_item = QGraphicsSvgItem()
         svg_item.setSharedRenderer(renderer)
-        svg_item.setElementId("")
+        svg_item.setElementId("")  # Render entire SVG
         
-        transform = QTransform()
-        bbox_rect = None
-        
-        # Handle 2-pin components differently: anchor to pins
-        # For 2-pin components (R, C, L, D, V, I), the SVG connection points
-        # are anchored directly to the pin positions, ensuring perfect alignment.
-        # Example: Horizontal resistor with pins at (0, 0) and (40, 0):
-        #   - SVG left connection point → pin1 at (0, 0)
-        #   - SVG right connection point → pin2 at (40, 0)
-        #   - Rotation = 0°, scale = pin_distance / svg_width
-        if len(comp.pins) == 2:
-            pin1 = comp.pins[0]
-            pin2 = comp.pins[1]
-            
-            # SVG anchor points: left and right connection points (mid-left and mid-right of viewBox)
-            anchor1_svg_x = viewbox.left()
-            anchor1_svg_y = viewbox.center().y()
-            anchor2_svg_x = viewbox.right()
-            anchor2_svg_y = viewbox.center().y()
-            
-            # Distance in SVG and scene coordinates
-            length_svg = base_w
-            dx = pin2.x - pin1.x
-            dy = pin2.y - pin1.y
-            length_scene = sqrt(dx*dx + dy*dy)
-            
-            if length_scene == 0:
-                return  # Avoid division by zero
-            
-            # Compute scale to match pin distance exactly
-            scale = length_scene / length_svg if length_svg > 0 else 1.0
-            
-            # Compute rotation angle to align with pin vector
-            # Example: Vertical component with pins at (0, 0) and (0, 40):
-            #   - angle_deg = 90°, symbol rotated 90° to align with pins
-            angle_deg = degrees(atan2(dy, dx))
-            
-            # Build transform:
-            # 1. Translate anchor1_svg to origin (so we can rotate/scale around it)
-            transform.translate(-anchor1_svg_x, -anchor1_svg_y)
-            
-            # 2. Apply flip if needed (before rotation)
-            if comp.extra.get("flipped", False):
-                transform.scale(-1, 1)
-            
-            # 3. Apply rotation (component rotation + angle to align with pins)
-            if comp.rotation != 0:
-                transform.rotate(comp.rotation)
-            transform.rotate(angle_deg)
-            
-            # 4. Apply scaling (so SVG width matches pin distance)
-            transform.scale(scale, scale)
-            
-            # 5. Position at pin1: after transform, origin is at anchor1 position, place it at pin1
-            svg_item.setPos(pin1.x, pin1.y)
-            
-            # Compute bounding box for hit testing: aligned with pin axis
-            # Add padding perpendicular to the pin axis
-            padding = base_h * scale * 0.3  # 30% of symbol height as padding
-            # Perpendicular vector (normalized)
-            perp_x = -dy / length_scene
-            perp_y = dx / length_scene
-            
-            # Bounding box corners in scene coordinates
-            bbox_x1 = pin1.x + perp_x * padding
-            bbox_y1 = pin1.y + perp_y * padding
-            bbox_x2 = pin2.x + perp_x * padding
-            bbox_y2 = pin2.y + perp_y * padding
-            bbox_x3 = pin2.x - perp_x * padding
-            bbox_y3 = pin2.y - perp_y * padding
-            bbox_x4 = pin1.x - perp_x * padding
-            bbox_y4 = pin1.y - perp_y * padding
-            
-            # Create bounding rect from these corners
-            bbox_min_x = min(bbox_x1, bbox_x2, bbox_x3, bbox_x4)
-            bbox_max_x = max(bbox_x1, bbox_x2, bbox_x3, bbox_x4)
-            bbox_min_y = min(bbox_y1, bbox_y2, bbox_y3, bbox_y4)
-            bbox_max_y = max(bbox_y1, bbox_y2, bbox_y3, bbox_y4)
-            bbox_rect = QRectF(bbox_min_x, bbox_min_y, bbox_max_x - bbox_min_x, bbox_max_y - bbox_min_y)
-            
-            center_x = (pin1.x + pin2.x) / 2
-            center_y = (pin1.y + pin2.y) / 2
-            
+        # Position SVG (same approach as preview for consistency)
+        # For BJT components, account for the 16-pixel right shift of pins
+        if comp.ctype == "Q":
+            # BJT pins are shifted 16 pixels right
+            # SVG Base is at (0, 32), Collector at (32, 0), Emitter at (32, 64)
+            # Adjust positioning to align SVG pins with shifted canvas pins
+            svg_item.setPos(center_x - symbol_width / 2 + 16, center_y - symbol_height / 2)
         else:
-            # Multi-pin components: center-based layout
-            pin_x_coords = [p.x for p in comp.pins]
-            pin_y_coords = [p.y for p in comp.pins]
-            min_x, max_x = min(pin_x_coords), max(pin_x_coords)
-            min_y, max_y = min(pin_y_coords), max(pin_y_coords)
+            svg_item.setPos(center_x - symbol_width / 2, center_y - symbol_height / 2)
+        
+        # Apply transform: scale and optionally rotate/flip
+        scale_x = symbol_width / 64.0
+        scale_y = symbol_height / 64.0
+        
+        # Build transform matching preview logic
+        if comp.rotation != 0 or comp.extra.get("flipped", False):
+            # Complex transform: translate to center, rotate/flip, translate back, scale
+            transform = QTransform()
+            transform.translate(center_x, center_y)
             
-            # Component center (snap to grid)
-            center_x = (min_x + max_x) / 2
-            center_y = (min_y + max_y) / 2
-            center_x = round(center_x / self._grid_size) * self._grid_size
-            center_y = round(center_y / self._grid_size) * self._grid_size
-            
-            # Determine symbol size
-            pin_span_x = max_x - min_x
-            pin_span_y = max_y - min_y
-            symbol_size = max(pin_span_x, pin_span_y, 40.0) * 1.2  # 20% larger than pin span
-            
-            # Maintain aspect ratio
-            svg_aspect = base_h / base_w if base_w > 0 else 1.0
-            symbol_width = symbol_size
-            symbol_height = symbol_size * svg_aspect
-            
-            # Scale factors
-            scale_x = symbol_width / base_w
-            scale_y = symbol_height / base_h
-            
-            # ViewBox center
-            viewbox_center = viewbox.center()
-            cx = viewbox_center.x()
-            cy = viewbox_center.y()
-            
-            # Build transform: center-based
-            transform.translate(-cx, -cy)
-            
-            # Apply flip if needed
+            # Apply flip if needed (horizontal flip)
             if comp.extra.get("flipped", False):
                 transform.scale(-1, 1)
             
@@ -541,23 +524,24 @@ class SchematicView(QGraphicsView):
             if comp.rotation != 0:
                 transform.rotate(comp.rotation)
             
-            # Apply scaling
+            # Translate back to original position
+            transform.translate(-center_x, -center_y)
+            
+            # Scale to desired size
             transform.scale(scale_x, scale_y)
             
-            # Position at center
-            svg_item.setPos(center_x, center_y)
-            
-            # Bounding box
-            half_w = symbol_width / 2
-            half_h = symbol_height / 2
-            bbox_rect = QRectF(center_x - half_w, center_y - half_h, symbol_width, symbol_height)
+            svg_item.setTransform(transform)
+        else:
+            # Simple scaling only (no rotation/flip) - matches preview
+            svg_item.setTransform(QTransform().scale(scale_x, scale_y))
         
-        svg_item.setTransform(transform)
         scene.addItem(svg_item)
         
-        # Hit testing bounding box
-        bbox_item = QGraphicsRectItem(bbox_rect)
-        bbox_item.setPen(Qt.PenStyle.NoPen)
+        # Store reference for selection/dragging
+        # Use a bounding rect item for hit testing
+        bbox_item = QGraphicsRectItem(center_x - symbol_width/2, center_y - symbol_height/2, 
+                                      symbol_width, symbol_height)
+        bbox_item.setPen(Qt.PenStyle.NoPen)  # Invisible, used for hit testing
         bbox_item.setBrush(Qt.BrushStyle.NoBrush)
         scene.addItem(bbox_item)
         
@@ -565,7 +549,7 @@ class SchematicView(QGraphicsView):
         self._component_graphics_to_model[bbox_item] = comp
         self._component_ref_to_graphics[comp.ref] = bbox_item
         
-        # Draw pins (small circles at pin positions - these stay on grid)
+        # Draw pins (small circles at pin positions)
         for pin in comp.pins:
             pin_item = QGraphicsEllipseItem(pin.x - 2, pin.y - 2, 4, 4)
             pin_item.setPen(self._pin_pen)
@@ -575,21 +559,14 @@ class SchematicView(QGraphicsView):
         
         # Draw component label (skip for preview)
         if comp.ref != "PREVIEW":
-            # Use center for label positioning
-            if len(comp.pins) == 2:
-                label_x = center_x - 10
-                label_y = center_y - 25
-            else:
-                label_x = center_x - 10
-                label_y = center_y - 25
             label = QGraphicsTextItem(comp.ref)
-            label.setPos(label_x, label_y)
+            label.setPos(center_x - 10, center_y - 25)
             scene.addItem(label)
     
     def _draw_component_preview_svg(self, comp: SchematicComponent):
         """
         Draw a preview version of a component using SVG (semi-transparent).
-        Uses identical geometry to _draw_component_svg but with preview styling.
+        Similar to _draw_component_svg but with preview styling.
         """
         scene = self.scene()
         
@@ -609,115 +586,70 @@ class SchematicView(QGraphicsView):
         if renderer is None:
             return  # No preview if no SVG available
         
+        # Calculate component bounds and center from pins
         if not comp.pins:
             return
         
+        pin_x_coords = [p.x for p in comp.pins]
+        pin_y_coords = [p.y for p in comp.pins]
+        min_x, max_x = min(pin_x_coords), max(pin_x_coords)
+        min_y, max_y = min(pin_y_coords), max(pin_y_coords)
+        
+        center_x = (min_x + max_x) / 2
+        center_y = (min_y + max_y) / 2
+        
+        # Determine symbol size
+        if len(comp.pins) >= 2:
+            pin1 = comp.pins[0]
+            pin2 = comp.pins[1]
+            dx = pin2.x - pin1.x
+            dy = pin2.y - pin1.y
+            pin_distance = (dx**2 + dy**2)**0.5
+            symbol_size = max(pin_distance * 0.6, 40.0)
+        else:
+            symbol_size = 50.0
+        
         # Get SVG viewBox
         viewbox = renderer.viewBoxF()
-        if not viewbox.isValid():
-            viewbox = QRectF(0, 0, 64, 64)
+        svg_aspect = viewbox.height() / viewbox.width() if viewbox.isValid() and viewbox.width() > 0 else 1.0
         
-        base_w = viewbox.width()
-        base_h = viewbox.height()
+        # Calculate symbol dimensions
+        if len(comp.pins) >= 2:
+            pin1 = comp.pins[0]
+            pin2 = comp.pins[1]
+            dx = pin2.x - pin1.x
+            dy = pin2.y - pin1.y
+            length = (dx**2 + dy**2)**0.5
+            symbol_width = max(length * 0.7, 40.0)
+            symbol_height = symbol_width * svg_aspect
+        else:
+            symbol_width = symbol_size
+            symbol_height = symbol_size * svg_aspect
         
         # Create SVG item with semi-transparent rendering
         svg_item = QGraphicsSvgItem()
         svg_item.setSharedRenderer(renderer)
         svg_item.setOpacity(0.5)  # Semi-transparent for preview
         svg_item.setElementId("")
-        
-        transform = QTransform()
-        
-        # Handle 2-pin components: anchor to pins (same logic as _draw_component_svg)
-        if len(comp.pins) == 2:
-            pin1 = comp.pins[0]
-            pin2 = comp.pins[1]
-            
-            # SVG anchor points: left and right connection points
-            anchor1_svg_x = viewbox.left()
-            anchor1_svg_y = viewbox.center().y()
-            anchor2_svg_x = viewbox.right()
-            anchor2_svg_y = viewbox.center().y()
-            
-            # Distance in SVG and scene coordinates
-            length_svg = base_w
-            dx = pin2.x - pin1.x
-            dy = pin2.y - pin1.y
-            length_scene = sqrt(dx*dx + dy*dy)
-            
-            if length_scene == 0:
-                return  # Avoid division by zero
-            
-            # Compute scale to match pin distance
-            scale = length_scene / length_svg if length_svg > 0 else 1.0
-            
-            # Compute rotation angle
-            angle_deg = degrees(atan2(dy, dx))
-            
-            # Build transform (same as _draw_component_svg)
-            transform.translate(-anchor1_svg_x, -anchor1_svg_y)
-            
-            if comp.extra.get("flipped", False):
-                transform.scale(-1, 1)
-            
-            if comp.rotation != 0:
-                transform.rotate(comp.rotation)
-            transform.rotate(angle_deg)
-            
-            transform.scale(scale, scale)
-            
-            svg_item.setPos(pin1.x, pin1.y)
-            
+        # For BJT components, account for the 16-pixel right shift of pins
+        if comp.ctype == "Q":
+            svg_item.setPos(center_x - symbol_width / 2 + 16, center_y - symbol_height / 2)
         else:
-            # Multi-pin components: center-based layout (same as _draw_component_svg)
-            pin_x_coords = [p.x for p in comp.pins]
-            pin_y_coords = [p.y for p in comp.pins]
-            min_x, max_x = min(pin_x_coords), max(pin_x_coords)
-            min_y, max_y = min(pin_y_coords), max(pin_y_coords)
-            
-            # Component center (snap to grid)
-            center_x = (min_x + max_x) / 2
-            center_y = (min_y + max_y) / 2
-            center_x = round(center_x / self._grid_size) * self._grid_size
-            center_y = round(center_y / self._grid_size) * self._grid_size
-            
-            # Determine symbol size
-            pin_span_x = max_x - min_x
-            pin_span_y = max_y - min_y
-            symbol_size = max(pin_span_x, pin_span_y, 40.0) * 1.2
-            
-            # Maintain aspect ratio
-            svg_aspect = base_h / base_w if base_w > 0 else 1.0
-            symbol_width = symbol_size
-            symbol_height = symbol_size * svg_aspect
-            
-            # Scale factors
-            scale_x = symbol_width / base_w
-            scale_y = symbol_height / base_h
-            
-            # ViewBox center
-            viewbox_center = viewbox.center()
-            cx = viewbox_center.x()
-            cy = viewbox_center.y()
-            
-            # Build transform: center-based
-            transform.translate(-cx, -cy)
-            
-            if comp.extra.get("flipped", False):
-                transform.scale(-1, 1)
-            
-            if comp.rotation != 0:
-                transform.rotate(comp.rotation)
-            
-            transform.scale(scale_x, scale_y)
-            
-            svg_item.setPos(center_x, center_y)
+            svg_item.setPos(center_x - symbol_width / 2, center_y - symbol_height / 2)
+        svg_item.setTransform(QTransform().scale(symbol_width / 64.0, symbol_height / 64.0))
         
-        svg_item.setTransform(transform)
+        # Apply rotation
+        if comp.rotation != 0:
+            svg_item.setTransform(QTransform()
+                                  .translate(center_x, center_y)
+                                  .rotate(comp.rotation)
+                                  .translate(-center_x, -center_y)
+                                  .scale(symbol_width / 64.0, symbol_height / 64.0))
+        
         scene.addItem(svg_item)
         self._preview_component_items.append(svg_item)
         
-        # Draw preview pins (semi-transparent, at grid-snapped positions)
+        # Draw preview pins (semi-transparent)
         for pin in comp.pins:
             pin_item = QGraphicsEllipseItem(pin.x - 2, pin.y - 2, 4, 4)
             pin_item.setPen(self._preview_pen)
@@ -914,10 +846,11 @@ class SchematicView(QGraphicsView):
 
     def _create_resistor(self, ref: str, x: float, y: float) -> SchematicComponent:
         """Create a resistor component at position (x, y)."""
-        half_len = 25.0
-        pin_offset = 15.0
-        pin1_x, pin1_y = self._snap_to_grid(x - half_len - pin_offset, y)
-        pin2_x, pin2_y = self._snap_to_grid(x + half_len + pin_offset, y)
+        # SVG pins at (0,32) and (64,32) - 64 pixels apart
+        # Pin spacing should be 32 pixels from center on each side = 64 total
+        pin_offset = 32.0
+        pin1_x, pin1_y = self._snap_to_grid(x - pin_offset, y)
+        pin2_x, pin2_y = self._snap_to_grid(x + pin_offset, y)
         
         comp = SchematicComponent(
             ref=ref,
@@ -935,7 +868,8 @@ class SchematicView(QGraphicsView):
 
     def _create_capacitor(self, ref: str, x: float, y: float) -> SchematicComponent:
         """Create a capacitor component at position (x, y)."""
-        pin_offset = 15.0
+        # SVG pins at (0,32) and (64,32) - 64 pixels apart
+        pin_offset = 32.0
         pin1_x, pin1_y = self._snap_to_grid(x - pin_offset, y)
         pin2_x, pin2_y = self._snap_to_grid(x + pin_offset, y)
         
@@ -955,7 +889,13 @@ class SchematicView(QGraphicsView):
 
     def _create_opamp(self, ref: str, x: float, y: float) -> SchematicComponent:
         """Create an op-amp component at position (x, y)."""
-        size = 40.0
+        # SVG pins: In+ at (0,24), In- at (0,40), Out at (64,32)
+        # SVG is 64x64, inputs are 8 pixels apart vertically (24 to 40 = 16 pixels, centered at 32)
+        # Component center should align with SVG center (32,32)
+        input_y_spacing = 8.0  # Half the spacing between inputs (16/2 = 8)
+        input_x = x - 32.0  # Inputs are 32 pixels left of center (at SVG x=0)
+        output_x = x + 32.0  # Output is 32 pixels right of center (at SVG x=64)
+        
         comp = SchematicComponent(
             ref=ref,
             ctype="OPAMP",
@@ -964,18 +904,22 @@ class SchematicView(QGraphicsView):
             rotation=0,
             value=0.0,
             pins=[
-                SchematicPin(name="+", x=x, y=y - size/2, net=None),  # Non-inverting
-                SchematicPin(name="-", x=x, y=y + size/2, net=None),  # Inverting
-                SchematicPin(name="out", x=x + size, y=y, net=None),  # Output
+                SchematicPin(name="+", x=self._snap_to_grid(input_x, y - input_y_spacing)[0], 
+                            y=self._snap_to_grid(input_x, y - input_y_spacing)[1], net=None),  # Non-inverting
+                SchematicPin(name="-", x=self._snap_to_grid(input_x, y + input_y_spacing)[0], 
+                            y=self._snap_to_grid(input_x, y + input_y_spacing)[1], net=None),  # Inverting
+                SchematicPin(name="out", x=self._snap_to_grid(output_x, y)[0], 
+                            y=self._snap_to_grid(output_x, y)[1], net=None),  # Output
             ],
         )
         return comp
 
     def _create_voltage_source(self, ref: str, x: float, y: float) -> SchematicComponent:
         """Create a voltage source component at position (x, y)."""
-        wire_length = 10.0  # Short wire length
-        pin1_x, pin1_y = self._snap_to_grid(x, y - wire_length)
-        pin2_x, pin2_y = self._snap_to_grid(x, y + wire_length)
+        # SVG pins at (32,0) and (32,64) - 64 pixels apart vertically
+        pin_offset = 32.0
+        pin1_x, pin1_y = self._snap_to_grid(x, y - pin_offset)
+        pin2_x, pin2_y = self._snap_to_grid(x, y + pin_offset)
         
         comp = SchematicComponent(
             ref=ref,
@@ -993,9 +937,10 @@ class SchematicView(QGraphicsView):
 
     def _create_current_source(self, ref: str, x: float, y: float) -> SchematicComponent:
         """Create a current source component at position (x, y)."""
-        wire_length = 10.0  # Short wire length
-        pin1_x, pin1_y = self._snap_to_grid(x, y - wire_length)
-        pin2_x, pin2_y = self._snap_to_grid(x, y + wire_length)
+        # SVG pins at (32,0) and (32,64) - 64 pixels apart vertically
+        pin_offset = 32.0
+        pin1_x, pin1_y = self._snap_to_grid(x, y - pin_offset)
+        pin2_x, pin2_y = self._snap_to_grid(x, y + pin_offset)
         
         comp = SchematicComponent(
             ref=ref,
@@ -1047,9 +992,10 @@ class SchematicView(QGraphicsView):
     
     def _create_inductor(self, ref: str, x: float, y: float) -> SchematicComponent:
         """Create an inductor component at position (x, y)."""
-        pin_spacing = 50.0
-        pin1_x, pin1_y = self._snap_to_grid(x - pin_spacing/2, y)
-        pin2_x, pin2_y = self._snap_to_grid(x + pin_spacing/2, y)
+        # SVG pins at (0,32) and (64,32) - 64 pixels apart
+        pin_offset = 32.0
+        pin1_x, pin1_y = self._snap_to_grid(x - pin_offset, y)
+        pin2_x, pin2_y = self._snap_to_grid(x + pin_offset, y)
         
         comp = SchematicComponent(
             ref=ref,
@@ -1067,9 +1013,10 @@ class SchematicView(QGraphicsView):
     
     def _create_diode(self, ref: str, x: float, y: float) -> SchematicComponent:
         """Create a diode component at position (x, y)."""
-        pin_spacing = 40.0
-        pin1_x, pin1_y = self._snap_to_grid(x - pin_spacing/2, y)
-        pin2_x, pin2_y = self._snap_to_grid(x + pin_spacing/2, y)
+        # SVG pins at (0,32) and (64,32) - 64 pixels apart
+        pin_offset = 32.0
+        pin1_x, pin1_y = self._snap_to_grid(x - pin_offset, y)
+        pin2_x, pin2_y = self._snap_to_grid(x + pin_offset, y)
         
         comp = SchematicComponent(
             ref=ref,
@@ -1088,11 +1035,14 @@ class SchematicView(QGraphicsView):
     
     def _create_bjt(self, ref: str, x: float, y: float) -> SchematicComponent:
         """Create a BJT transistor component at position (x, y)."""
-        pin_spacing = 30.0
+        # SVG pins: Base at (0,32), Collector at (32,0), Emitter at (32,64)
+        # Pin spacing: 32 pixels from center
+        pin_spacing = 32.0
         # Standard BJT pin layout: C (top), B (left), E (bottom)
-        collector_x, collector_y = self._snap_to_grid(x, y - pin_spacing)
-        base_x, base_y = self._snap_to_grid(x - pin_spacing, y)
-        emitter_x, emitter_y = self._snap_to_grid(x, y + pin_spacing)
+        # Shift all terminals 16 pixels right (from original + 32 from previous left shift)
+        collector_x, collector_y = self._snap_to_grid(x + 16, y - pin_spacing)
+        base_x, base_y = self._snap_to_grid(x - pin_spacing + 16, y)
+        emitter_x, emitter_y = self._snap_to_grid(x + 16, y + pin_spacing)
         
         comp = SchematicComponent(
             ref=ref,
@@ -1114,7 +1064,7 @@ class SchematicView(QGraphicsView):
     
     def _create_mosfet(self, ref: str, x: float, y: float) -> SchematicComponent:
         """Create a MOSFET component at position (x, y)."""
-        pin_spacing = 30.0
+        pin_spacing = 32.0
         # Standard MOSFET pin layout: D (top), G (left), S (bottom), B (right, if 4-terminal)
         drain_x, drain_y = self._snap_to_grid(x, y - pin_spacing)
         gate_x, gate_y = self._snap_to_grid(x - pin_spacing, y)
@@ -1142,7 +1092,9 @@ class SchematicView(QGraphicsView):
     
     def _create_vccs(self, ref: str, x: float, y: float) -> SchematicComponent:
         """Create a voltage-controlled current source (VCCS) component at position (x, y)."""
-        pin_spacing = 25.0
+        # SVG pins: Output at (32,0) and (32,64), Control at (0,32) and (64,32)
+        # Pin spacing: 32 pixels from center
+        pin_spacing = 32.0
         # VCCS layout: 4 pins arranged in a square
         # Output current pins (IP, IN) - vertical
         ip_x, ip_y = self._snap_to_grid(x, y - pin_spacing)
@@ -2466,3 +2418,49 @@ class SchematicView(QGraphicsView):
         self._drag_start_pos = None
         self._clicked_component_ref = None
         super().mouseReleaseEvent(event)
+    
+    def wheelEvent(self, event: QWheelEvent):
+        """Handle mouse wheel events for zooming."""
+        # Zoom factor: 1.15 per step (common zoom increment)
+        zoom_factor = 1.15
+        
+        # Determine zoom direction based on wheel delta
+        if event.angleDelta().y() > 0:
+            # Zoom in
+            scale_factor = zoom_factor
+        else:
+            # Zoom out
+            scale_factor = 1.0 / zoom_factor
+        
+        # Get current scale
+        current_scale = self.transform().m11()  # Get horizontal scale factor
+        
+        # Calculate new scale
+        new_scale = current_scale * scale_factor
+        
+        # Set zoom limits (min 0.1x, max 10x)
+        min_scale = 0.1
+        max_scale = 10.0
+        
+        if new_scale < min_scale:
+            scale_factor = min_scale / current_scale
+            new_scale = min_scale
+        elif new_scale > max_scale:
+            scale_factor = max_scale / current_scale
+            new_scale = max_scale
+        
+        # Get mouse position in scene coordinates (before zoom)
+        scene_pos = self.mapToScene(event.position().toPoint())
+        
+        # Apply zoom
+        self.scale(scale_factor, scale_factor)
+        
+        # Calculate new mouse position in scene coordinates (after zoom)
+        new_scene_pos = self.mapToScene(event.position().toPoint())
+        
+        # Adjust view position to keep the point under the mouse in the same place
+        delta = new_scene_pos - scene_pos
+        self.translate(delta.x(), delta.y())
+        
+        # Accept the event so it's not propagated
+        event.accept()

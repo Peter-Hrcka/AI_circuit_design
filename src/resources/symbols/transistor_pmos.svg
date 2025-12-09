@@ -1,1 +1,116 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" fill="none" stroke="black" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="32" cy="32" r="24" /><line x1="4" y1="32" x2="18" y2="32" /><line x1="18" y1="16" x2="18" y2="48" /><line x1="26" y1="16" x2="26" y2="24" /><line x1="26" y1="28" x2="26" y2="36" /><line x1="26" y1="40" x2="26" y2="48" /><polyline points="44,12 44,20 26,20" /><polyline points="44,52 44,44 26,44" /><polyline points="44,32 26,32" /><polyline points="38,28 46,32 38,36" /></svg>
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg
+   width="64"
+   height="64"
+   viewBox="0 0 64 64"
+   fill="none"
+   stroke="black"
+   stroke-width="2.5"
+   stroke-linecap="round"
+   stroke-linejoin="round"
+   version="1.1"
+   id="svg9"
+   sodipodi:docname="transistor_pmos.svg"
+   inkscape:version="1.4.2 (f4327f4, 2025-05-13)"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <defs
+     id="defs9" />
+  <sodipodi:namedview
+     id="namedview9"
+     pagecolor="#ffffff"
+     bordercolor="#000000"
+     borderopacity="0.25"
+     inkscape:showpageshadow="2"
+     inkscape:pageopacity="0.0"
+     inkscape:pagecheckerboard="0"
+     inkscape:deskcolor="#d1d1d1"
+     inkscape:zoom="12.609375"
+     inkscape:cx="32"
+     inkscape:cy="32"
+     inkscape:window-width="1920"
+     inkscape:window-height="1009"
+     inkscape:window-x="-8"
+     inkscape:window-y="-8"
+     inkscape:window-maximized="1"
+     inkscape:current-layer="svg9" />
+  <circle
+     cx="32"
+     cy="32"
+     r="24"
+     id="circle1" />
+  <line
+     x1="0"
+     y1="32"
+     x2="16"
+     y2="32"
+     id="line1" />
+  <line
+     x1="16"
+     y1="16"
+     x2="16"
+     y2="48"
+     id="line2" />
+  <line
+     x1="24"
+     y1="16"
+     x2="24"
+     y2="24"
+     id="line3" />
+  <line
+     x1="24"
+     y1="28"
+     x2="24"
+     y2="36"
+     id="line4" />
+  <line
+     x1="24"
+     y1="40"
+     x2="24"
+     y2="48"
+     id="line5" />
+  <line
+     x1="32"
+     y1="0"
+     x2="32"
+     y2="16"
+     id="line6" />
+  <line
+     x1="32"
+     y1="16"
+     x2="24"
+     y2="16"
+     id="line7" />
+  <line
+     x1="32"
+     y1="64"
+     x2="32"
+     y2="48"
+     id="line8" />
+  <line
+     x1="32"
+     y1="48"
+     x2="24"
+     y2="48"
+     id="line9" />
+  <line
+     x1="24.620817"
+     y1="31.824039"
+     x2="40.620819"
+     y2="31.824039"
+     id="line1-1" />
+  <line
+     x1="38.938042"
+     y1="31.841389"
+     x2="54.938042"
+     y2="31.841389"
+     id="line1-11" />
+  <line
+     x1="48.961586"
+     y1="31.796778"
+     x2="64.961586"
+     y2="31.796778"
+     id="line1-2" />
+</svg>
