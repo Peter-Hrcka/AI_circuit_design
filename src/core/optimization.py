@@ -233,7 +233,14 @@ def _find_output_node(circuit: Circuit) -> str:
     return "Vout"
 
 
-def measure_gain_spice(circuit, freq_hz: float, model_meta, input_node: str = "Vin", output_node: str = None):
+def measure_gain_spice(
+    circuit,
+    freq_hz: float,
+    model_meta,
+    input_node: str = "Vin",
+    output_node: str | None = None,
+    vsource_ref: str | None = None,
+):
     """
     Run a single-frequency AC analysis for the given circuit and return
     the gain in dB at freq_hz, using the existing SimulatorManager.
@@ -244,13 +251,20 @@ def measure_gain_spice(circuit, freq_hz: float, model_meta, input_node: str = "V
         model_meta: Model metadata (for simulator selection)
         input_node: Input node name (default: "Vin")
         output_node: Output node name (auto-detected if None)
+        vsource_ref: Optional reference of voltage source to use as AC input
     """
     # Auto-detect output node if not provided
     if output_node is None:
         output_node = _find_output_node(circuit)
     
     # Build the AC netlist using general builder
-    net = build_general_ac_netlist(circuit, freq_hz=freq_hz, input_node=input_node, output_node=output_node)
+    net = build_general_ac_netlist(
+        circuit,
+        freq_hz=freq_hz,
+        input_node=input_node,
+        output_node=output_node,
+        vsource_ref=vsource_ref,
+    )
 
     # Use the multi-backend manager (ngspice / Xyce) to run AC gain
     result = sims.run_ac_gain(net, model_meta)

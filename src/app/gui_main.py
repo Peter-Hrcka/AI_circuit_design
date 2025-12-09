@@ -458,6 +458,14 @@ class MainWindow(QMainWindow):
         toolbar.addAction(self.action_place_ground)
         self.btn_place_ground = toolbar.widgetForAction(self.action_place_ground)
         
+        self.action_place_output = QAction(icon("comp_output_node.svg"), "Output node", self)
+        self.action_place_output.setCheckable(True)
+        self.action_place_output.setToolTip("Output node marker (VOUT)")
+        self._placement_action_to_type[self.action_place_output] = "VOUT"
+        self.action_place_output.triggered.connect(self.on_place_component_clicked)
+        toolbar.addAction(self.action_place_output)
+        self.btn_place_output = toolbar.widgetForAction(self.action_place_output)
+        
         self.action_place_net_label = QAction(icon("tool_net_label.svg"), "Net Label", self)
         self.action_place_net_label.setCheckable(True)
         self.action_place_net_label.setToolTip("Net Label")
@@ -500,6 +508,7 @@ class MainWindow(QMainWindow):
             self.btn_place_voltage,
             self.btn_place_current,
             self.btn_place_ground,
+            self.btn_place_output,
         ]
         # Also store actions for easier access
         self._placement_actions = [
@@ -513,6 +522,7 @@ class MainWindow(QMainWindow):
             self.action_place_voltage,
             self.action_place_current,
             self.action_place_ground,
+            self.action_place_output,
         ]
         
         # Simulation & AI controls (right side of toolbar)
@@ -714,6 +724,15 @@ class MainWindow(QMainWindow):
         self.freq_edit.setSuffix(" Hz")
         form.addRow("Frequency:", self.freq_edit)
         
+        # AC input source selection
+        ac_source_label = QLabel("AC input source:")
+        self.ac_source_combo = QComboBox()
+        self.ac_source_combo.setToolTip(
+            "Select which voltage source is used as AC input. "
+            "If empty, the first V source or Vin node will be used."
+        )
+        form.addRow(ac_source_label, self.ac_source_combo)
+        
         # Time span (for Transient)
         time_span_edit = QDoubleSpinBox()
         time_span_edit.setRange(1e-9, 1.0)
@@ -747,6 +766,9 @@ class MainWindow(QMainWindow):
         
         dock.setWidget(tabs)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+        
+        # Populate AC source list
+        self._refresh_ac_source_list()
 
     def _setup_bottom_dock(self):
         """Create bottom dock widget for Log / Results."""
@@ -836,7 +858,7 @@ class MainWindow(QMainWindow):
                     return
             
             # If no action found, activate placement mode directly
-            if component_type in ["R", "C", "OPAMP", "V", "I", "GND"]:
+            if component_type in ["R", "C", "OPAMP", "V", "I", "GND", "VOUT"]:
                 # These have actions, already handled above
                 pass
             else:
@@ -867,6 +889,55 @@ class MainWindow(QMainWindow):
     def log(self, text: str) -> None:
         """Append a line to the output box."""
         self.output.append(text)
+    
+    def _refresh_ac_source_list(self) -> None:
+        """
+        Populate the AC source combo with voltage sources from the current schematic.
+
+        Items:
+            - text: "V1 (node+ -> node-)" etc
+            - data: the component ref (e.g. "V1")
+
+        If there is no schematic or no voltage sources, add a single
+        "Auto (first V source / Vin)" entry with data = None.
+        """
+        if not hasattr(self, "ac_source_combo") or self.ac_source_combo is None:
+            return
+
+        combo = self.ac_source_combo
+        combo.blockSignals(True)
+        combo.clear()
+
+        model = getattr(self, "schematic_view", None)
+        if model is not None:
+            model = getattr(self.schematic_view, "model", None)
+
+        if model is not None and getattr(model, "components", None):
+            for comp in model.components:
+                if getattr(comp, "ctype", "") == "V":
+                    node1 = getattr(comp, "node1", "")
+                    node2 = getattr(comp, "node2", "")
+                    ref = getattr(comp, "ref", "")
+                    text = f"{ref} ({node1} -> {node2})".strip()
+                    combo.addItem(text, ref)
+
+        # If nothing was added, fall back to auto-selection
+        if combo.count() == 0:
+            combo.addItem("Auto (first V source / Vin)", None)
+
+        combo.blockSignals(False)
+
+    def _get_selected_ac_source_ref(self) -> str | None:
+        """
+        Return the selected voltage source reference from the combo, or None
+        if auto-selection should be used.
+        """
+        if not hasattr(self, "ac_source_combo") or self.ac_source_combo is None:
+            return None
+        idx = self.ac_source_combo.currentIndex()
+        if idx < 0:
+            return None
+        return self.ac_source_combo.itemData(idx)
 
     def on_browse_model(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -1371,6 +1442,10 @@ class MainWindow(QMainWindow):
             )
             return
 
+        # Refresh AC source list and get selection
+        self._refresh_ac_source_list()
+        vsource_ref = self._get_selected_ac_source_ref()
+
         self.log("")
         self.log("Re-simulating current schematic...")
 
@@ -1379,6 +1454,7 @@ class MainWindow(QMainWindow):
                 circuit,
                 freq_hz=freq_hz,
                 model_meta=meta_model,
+                vsource_ref=vsource_ref,
             )
         except Exception as exc:
             QMessageBox.critical(self, "SPICE error", f"Error during SPICE re-simulation:\n{exc}")
@@ -1399,9 +1475,11 @@ class MainWindow(QMainWindow):
         if meta_model is not None:  # Only if we have a model
             self.log("")
             self.log("Running AC sweep for bandwidth (current schematic)...")
-            ac_net = build_ac_sweep_netlist(circuit)
+            ac_net = build_ac_sweep_netlist(circuit, vsource_ref=vsource_ref)
             ac_res = sims.run_ac_sweep(ac_net, meta_model)
-        bw = find_3db_bandwidth(ac_res["freq_hz"], ac_res["gain_db"])
+            bw = find_3db_bandwidth(ac_res["freq_hz"], ac_res["gain_db"])
+        else:
+            bw = None
         if bw is None:
             self.log("Bandwidth (-3 dB): > sweep range (no rolloff found)")
         else:
@@ -1410,7 +1488,7 @@ class MainWindow(QMainWindow):
         # Noise analysis with current values
         self.log("")
         self.log("Running noise analysis (10 Hz – 20 kHz, current schematic).")
-        noise_net = build_noise_netlist(self.current_circuit)
+        noise_net = build_noise_netlist(self.current_circuit, vsource_ref=vsource_ref)
         noise_res = sims.run_noise_sweep(noise_net, meta_model)
 
         onoise = noise_res["total_onoise_rms"]
@@ -1603,6 +1681,10 @@ class MainWindow(QMainWindow):
             )
             return
 
+        # Refresh AC source list and get selection
+        self._refresh_ac_source_list()
+        vsource_ref = self._get_selected_ac_source_ref()
+
         self.log("")
         self.log("Simulating circuit built FROM schematic (no optimization).")
 
@@ -1612,6 +1694,7 @@ class MainWindow(QMainWindow):
                 circuit,
                 freq_hz=freq_hz,
                 model_meta=meta_model,
+                vsource_ref=vsource_ref,
             )
         except Exception as exc:
             QMessageBox.critical(
@@ -1635,7 +1718,7 @@ class MainWindow(QMainWindow):
         # Optional: AC sweep with these values
         self.log("")
         self.log("Running AC sweep for bandwidth (schematic circuit).")
-        ac_net = build_ac_sweep_netlist(circuit)
+        ac_net = build_ac_sweep_netlist(circuit, vsource_ref=vsource_ref)
         ac_res = sims.run_ac_sweep(ac_net, meta_model)
         bw = find_3db_bandwidth(ac_res["freq_hz"], ac_res["gain_db"])
         if bw is None:
@@ -1778,9 +1861,124 @@ class MainWindow(QMainWindow):
             self.schematic_view.set_dc_voltages(schematic_voltages)
     
     def on_ac_analysis(self) -> None:
-        """Run AC analysis on the current schematic."""
-        QMessageBox.information(self, "Not Implemented", "Run AC analysis is not implemented yet.")
-        print("TODO: Run AC analysis")
+        """
+        Run AC analysis on the current schematic using the Analysis Setup
+        frequency and selected AC input source.
+        """
+        if self.schematic_view.model is None:
+            QMessageBox.information(
+                self, "No schematic",
+                "No schematic model available. Please build a circuit first."
+            )
+            return
+
+        # Ensure AC source list is up to date and read selection
+        self._refresh_ac_source_list()
+        vsource_ref = self._get_selected_ac_source_ref()
+
+        # Get frequency from the Analysis Setup control
+        try:
+            if not hasattr(self, "freq_edit") or self.freq_edit is None:
+                QMessageBox.warning(self, "Error", "Analysis controls not initialized.")
+                return
+            if hasattr(self.freq_edit, "value"):
+                freq_hz = self.freq_edit.value()
+            else:
+                freq_hz = float(self.freq_edit.text())
+        except (ValueError, AttributeError):
+            QMessageBox.warning(
+                self,
+                "Invalid frequency",
+                "Please enter a numeric frequency (Hz).",
+            )
+            return
+
+        # Get or load model metadata
+        meta_model = self.last_model_meta
+        if meta_model is None:
+            # If a model path is specified in the Analysis Setup, load it
+            model_path = ""
+            if hasattr(self, "model_path_edit") and self.model_path_edit is not None:
+                model_path = self.model_path_edit.text().strip()
+            if model_path:
+                meta_model = self._load_model_with_conversion(model_path)
+                if meta_model is None:
+                    return
+                self.last_model_meta = meta_model
+            else:
+                # No external model -> use built-in model
+                meta_model = None
+                self.log("Using built-in op-amp model (no external model file loaded).")
+
+        # Validate schematic
+        from core.schematic_validation import validate_schematic
+        is_valid, validation_errors = validate_schematic(self.schematic_view.model)
+        if not is_valid:
+            dialog = ValidationErrorDialog(self, validation_errors, self.schematic_view.model)
+            dialog.exec()
+            return
+
+        # Build circuit from schematic
+        try:
+            from core.schematic_to_circuit import circuit_from_schematic
+            circuit = circuit_from_schematic(self.schematic_view.model)
+            self.current_circuit = circuit
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Schematic error",
+                f"Could not build circuit from schematic:\n{exc}",
+            )
+            return
+
+        self.log("")
+        self.log("Running single-frequency AC analysis on current schematic...")
+
+        # Measure gain at freq_hz using selected AC source and auto-detected VOUT
+        try:
+            from core.optimization import measure_gain_spice
+            measured_gain_db = measure_gain_spice(
+                circuit,
+                freq_hz=freq_hz,
+                model_meta=meta_model,
+                vsource_ref=vsource_ref,
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "SPICE error",
+                f"Error during AC analysis:\n{exc}",
+            )
+            return
+
+        self.log(f"AC analysis frequency: {freq_hz:.1f} Hz")
+        self.log(f"Measured gain (SPICE): {measured_gain_db:.2f} dB")
+
+        # AC sweep for bandwidth, using same AC source selection
+        try:
+            from core.analysis import find_3db_bandwidth
+            from core.simulator_manager import default_simulator_manager as sims
+            self.log("")
+            self.log("Running AC sweep for bandwidth (current schematic)...")
+            ac_net = build_ac_sweep_netlist(
+                circuit,
+                vsource_ref=vsource_ref,
+            )
+            ac_res = sims.run_ac_sweep(ac_net, meta_model)
+            bw = find_3db_bandwidth(ac_res["freq_hz"], ac_res["gain_db"])
+            if bw is None:
+                self.log("Bandwidth (-3 dB): > sweep range (no rolloff found)")
+            else:
+                self.log(f"Bandwidth (-3 dB): {bw/1000:.2f} kHz")
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "AC Sweep Error",
+                f"Error during AC sweep:\n{exc}",
+            )
+            return
+
+        self.log("AC analysis done.")
     
     def on_transient_analysis(self) -> None:
         """Run Transient analysis on the current schematic."""

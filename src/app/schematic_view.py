@@ -141,7 +141,7 @@ class SchematicView(QGraphicsView):
             "V": "source_dc.svg",
             "I": "source_current.svg",
             "GND": "passive_ground.svg",
-            "VOUT": "label_output.svg",
+            "VOUT": "output_node.svg",
         }
         
         base_dir = Path(__file__).parent.parent

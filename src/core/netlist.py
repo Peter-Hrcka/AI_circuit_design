@@ -315,6 +315,7 @@ def build_general_ac_netlist(
     freq_hz: float = 1000.0,
     input_node: str = "Vin",
     output_node: str = "Vout",
+    vsource_ref: str | None = None,
 ) -> str:
     """
     Build a general AC analysis netlist for any circuit topology.
@@ -324,21 +325,32 @@ def build_general_ac_netlist(
         freq_hz: Frequency for AC analysis
         input_node: Node name for input (will add AC source if not present)
         output_node: Node name for output (for measurement)
+        vsource_ref: Optional reference of voltage source to use as AC input
     """
     lines: List[str] = [f"* AC analysis for circuit: {circuit.name}"]
     lines.append("")
 
-    # Check if there's already a voltage source
-    has_vsource = False
-    vsource_node = None
+    # Select which voltage source will be used as AC input
+    selected_v = None
     for comp in circuit.components:
-        if comp.ctype == "V":
-            has_vsource = True
-            vsource_node = comp.node1  # Assume positive terminal
-            # Convert to AC source if it's DC
-            lines.append(f"{comp.ref} {comp.node1} {comp.node2} DC 0 AC 1")
+        if comp.ctype != "V":
+            continue
+        if vsource_ref and comp.ref == vsource_ref:
+            selected_v = comp
             break
-    
+        if selected_v is None:
+            selected_v = comp  # fallback to first V
+
+    if selected_v is not None:
+        has_vsource = True
+        vsource_node = selected_v.node1  # assume positive terminal
+        lines.append(
+            f"{selected_v.ref} {selected_v.node1} {selected_v.node2} DC 0 AC 1"
+        )
+    else:
+        has_vsource = False
+        vsource_node = None
+
     # Add AC source if not present
     if not has_vsource:
         lines.append(f"V1 {input_node} 0 AC 1")
@@ -456,22 +468,43 @@ def build_ac_sweep_netlist(
     points: int = 200,
     input_node: str = "Vin",
     output_node: str = "Vout",
+    vsource_ref: str | None = None,
 ) -> str:
     """
     Build a general AC sweep netlist for any circuit topology.
+    
+    Args:
+        circuit: Circuit to simulate
+        f_start: Start frequency (Hz)
+        f_stop: Stop frequency (Hz)
+        points: Number of points
+        input_node: Node name for input (will add AC source if not present)
+        output_node: Node name for output (for measurement)
+        vsource_ref: Optional reference of voltage source to use as AC input
     """
     lines = [f"* AC sweep for bandwidth - {circuit.name}"]
     lines.append("")
 
-    # Check if there's already a voltage source
-    has_vsource = False
-    vsource_node = None
+    # Select which voltage source will be used as AC input
+    selected_v = None
     for comp in circuit.components:
-        if comp.ctype == "V":
-            has_vsource = True
-            vsource_node = comp.node1
-            lines.append(f"{comp.ref} {comp.node1} {comp.node2} DC 0 AC 1")
+        if comp.ctype != "V":
+            continue
+        if vsource_ref and comp.ref == vsource_ref:
+            selected_v = comp
             break
+        if selected_v is None:
+            selected_v = comp  # fallback to first V
+
+    if selected_v is not None:
+        has_vsource = True
+        vsource_node = selected_v.node1
+        lines.append(
+            f"{selected_v.ref} {selected_v.node1} {selected_v.node2} DC 0 AC 1"
+        )
+    else:
+        has_vsource = False
+        vsource_node = None
     
     if not has_vsource:
         lines.append(f"V1 {input_node} 0 AC 1")
@@ -677,26 +710,54 @@ def build_noise_netlist(
     points: int = 50,
     input_node: str = "Vin",
     output_node: str = "Vout",
+    vsource_ref: str | None = None,
 ) -> str:
     """
     Build a general noise analysis netlist for any circuit topology.
+    
+    Args:
+        circuit: Circuit to simulate
+        f_start: Start frequency (Hz)
+        f_stop: Stop frequency (Hz)
+        points: Number of points
+        input_node: Node name for input (will add AC source if not present)
+        output_node: Node name for output (for measurement)
+        vsource_ref: Optional reference of voltage source to use as AC input
     """
     lines = [f"* Noise analysis - {circuit.name}"]
     lines.append("")
 
-    # Check if there's already a voltage source
-    has_vsource = False
-    vsource_ref = "V1"
+    # Select which voltage source will be used as AC input
+    selected_v = None
     for comp in circuit.components:
-        if comp.ctype == "V":
-            has_vsource = True
-            vsource_ref = comp.ref
-            # Input source MUST have DC and AC for .noise to be happy
-            lines.append(f"{comp.ref} {comp.node1} {comp.node2} DC 0 AC 1")
+        if comp.ctype != "V":
+            continue
+        if vsource_ref and comp.ref == vsource_ref:
+            selected_v = comp
             break
-    
-    if not has_vsource:
-        lines.append(f"V1 {input_node} 0 DC 0 AC 1")
+        if selected_v is None:
+            selected_v = comp  # fallback to first V
+
+    if selected_v is None:
+        # If still no source, create a default AC source at the input node
+        selected_v = Component(
+            ref="V1",
+            ctype="V",
+            node1=input_node,
+            node2="0",
+            value=0.0,
+            unit="V",
+            extra={},
+        )
+        # Note: Add the source to the netlist
+        lines.append(f"{selected_v.ref} {selected_v.node1} {selected_v.node2} DC 0 AC 1")
+    else:
+        # Input source MUST have DC and AC for .noise to be happy
+        lines.append(
+            f"{selected_v.ref} {selected_v.node1} {selected_v.node2} DC 0 AC 1"
+        )
+
+    vsource_name_for_noise = selected_v.ref
 
     # Add all components
     opamps: List[Component] = []
@@ -769,7 +830,7 @@ def build_noise_netlist(
     # Use a control block so we can use ngspice 'noise' and 'print' commands
     lines.append("")
     lines.append(".control")
-    lines.append(f"noise V({output_node}) {vsource_ref} dec {points} {f_start} {f_stop}")
+    lines.append(f"noise V({output_node}) {vsource_name_for_noise} dec {points} {f_start} {f_stop}")
     lines.append("setplot noise2")
     lines.append("print onoise_total inoise_total")
     lines.append("quit")
