@@ -55,10 +55,22 @@ class ComponentPropertiesDialog(QDialog):
             self._create_resistor_form(layout)
         elif component.ctype == "C":
             self._create_capacitor_form(layout)
+        elif component.ctype == "L":
+            self._create_inductor_form(layout)
+        elif component.ctype == "D":
+            self._create_diode_form(layout)
+        elif component.ctype == "Q":
+            self._create_bjt_form(layout)
+        elif component.ctype == "M":
+            self._create_mosfet_form(layout)
+        elif component.ctype == "G":
+            self._create_vccs_form(layout)
         elif component.ctype == "OPAMP":
             self._create_opamp_form(layout)
         elif component.ctype == "V":
             self._create_voltage_source_form(layout)
+        elif component.ctype == "I":
+            self._create_current_source_form(layout)
         else:
             self._create_generic_form(layout)
         
@@ -187,6 +199,115 @@ class ComponentPropertiesDialog(QDialog):
         group.setLayout(form_layout)
         layout.addWidget(group)
     
+    def _create_current_source_form(self, layout: QVBoxLayout):
+        """Create form for current source properties."""
+        form_layout = QFormLayout()
+        
+        # Current value
+        value_spin = QDoubleSpinBox()
+        value_spin.setRange(-1e6, 1e6)
+        value_spin.setDecimals(3)
+        value_spin.setSuffix(" A")
+        value_spin.setValue(self.component.value)
+        form_layout.addRow("Current:", value_spin)
+        self.form_widgets["value"] = value_spin
+        
+        group = QGroupBox("Current Source Properties")
+        group.setLayout(form_layout)
+        layout.addWidget(group)
+    
+    def _create_inductor_form(self, layout: QVBoxLayout):
+        """Create form for inductor properties."""
+        form_layout = QFormLayout()
+        
+        # Inductance value
+        value_spin = QDoubleSpinBox()
+        value_spin.setRange(0.0, 1e6)
+        value_spin.setDecimals(9)
+        value_spin.setSuffix(" H")
+        value_spin.setValue(self.component.value)
+        form_layout.addRow("Inductance:", value_spin)
+        self.form_widgets["value"] = value_spin
+        
+        group = QGroupBox("Inductor Properties")
+        group.setLayout(form_layout)
+        layout.addWidget(group)
+    
+    def _create_diode_form(self, layout: QVBoxLayout):
+        """Create form for diode properties."""
+        form_layout = QFormLayout()
+        
+        # Model name
+        model_edit = QLineEdit()
+        model_edit.setText(str(self.component.extra.get("model", "")))
+        form_layout.addRow("SPICE Model:", model_edit)
+        self.form_widgets["model"] = model_edit
+        
+        group = QGroupBox("Diode Properties")
+        group.setLayout(form_layout)
+        layout.addWidget(group)
+    
+    def _create_bjt_form(self, layout: QVBoxLayout):
+        """Create form for BJT transistor properties."""
+        form_layout = QFormLayout()
+        
+        # Polarity (NPN/PNP)
+        polarity_combo = QComboBox()
+        polarity_combo.addItems(["NPN", "PNP"])
+        current_polarity = str(self.component.extra.get("polarity", "NPN")).upper()
+        polarity_combo.setCurrentText(current_polarity if current_polarity in ("NPN", "PNP") else "NPN")
+        form_layout.addRow("Polarity:", polarity_combo)
+        self.form_widgets["polarity"] = polarity_combo
+        
+        # Model name
+        model_edit = QLineEdit()
+        model_edit.setText(str(self.component.extra.get("model", "")))
+        form_layout.addRow("SPICE Model:", model_edit)
+        self.form_widgets["model"] = model_edit
+        
+        group = QGroupBox("BJT Properties")
+        group.setLayout(form_layout)
+        layout.addWidget(group)
+    
+    def _create_mosfet_form(self, layout: QVBoxLayout):
+        """Create form for MOSFET transistor properties."""
+        form_layout = QFormLayout()
+        
+        # MOSFET type (NMOS/PMOS)
+        mos_type_combo = QComboBox()
+        mos_type_combo.addItems(["NMOS", "PMOS"])
+        current_type = str(self.component.extra.get("mos_type", "NMOS")).upper()
+        mos_type_combo.setCurrentText(current_type if current_type in ("NMOS", "PMOS") else "NMOS")
+        form_layout.addRow("Type:", mos_type_combo)
+        self.form_widgets["mos_type"] = mos_type_combo
+        
+        # Model name
+        model_edit = QLineEdit()
+        model_edit.setText(str(self.component.extra.get("model", "")))
+        form_layout.addRow("SPICE Model:", model_edit)
+        self.form_widgets["model"] = model_edit
+        
+        group = QGroupBox("MOSFET Properties")
+        group.setLayout(form_layout)
+        layout.addWidget(group)
+    
+    def _create_vccs_form(self, layout: QVBoxLayout):
+        """Create form for voltage-controlled current source (VCCS) properties."""
+        form_layout = QFormLayout()
+        
+        # Transconductance
+        value_spin = QDoubleSpinBox()
+        value_spin.setRange(-1e6, 1e6)
+        value_spin.setDecimals(6)
+        value_spin.setSuffix(" S")
+        value_spin.setValue(self.component.value)
+        form_layout.addRow("Transconductance:", value_spin)
+        self.form_widgets["value"] = value_spin
+        
+        group = QGroupBox("VCCS Properties")
+        group.setLayout(form_layout)
+        layout.addWidget(group)
+    
     def _create_generic_form(self, layout: QVBoxLayout):
         """Create generic form for unknown component types."""
         form_layout = QFormLayout()
@@ -245,6 +366,29 @@ class ComponentPropertiesDialog(QDialog):
                 self.form_widgets["dc_level"].setValue(self.component.value)
             if "ac_amplitude" in extra:
                 self.form_widgets["ac_amplitude"].setValue(float(extra["ac_amplitude"]))
+        
+        elif self.component.ctype == "D":
+            # Load diode properties
+            if "model" in self.form_widgets and "model" in extra:
+                self.form_widgets["model"].setText(str(extra["model"]))
+        
+        elif self.component.ctype == "Q":
+            # Load BJT properties
+            if "polarity" in self.form_widgets:
+                polarity = str(extra.get("polarity", "NPN")).upper()
+                if polarity in ("NPN", "PNP"):
+                    self.form_widgets["polarity"].setCurrentText(polarity)
+            if "model" in self.form_widgets and "model" in extra:
+                self.form_widgets["model"].setText(str(extra["model"]))
+        
+        elif self.component.ctype == "M":
+            # Load MOSFET properties
+            if "mos_type" in self.form_widgets:
+                mos_type = str(extra.get("mos_type", "NMOS")).upper()
+                if mos_type in ("NMOS", "PMOS"):
+                    self.form_widgets["mos_type"].setCurrentText(mos_type)
+            if "model" in self.form_widgets and "model" in extra:
+                self.form_widgets["model"].setText(str(extra["model"]))
     
     def accept(self):
         """Collect values from form and store in result_properties."""
@@ -271,6 +415,50 @@ class ComponentPropertiesDialog(QDialog):
             self.result_properties["ac_amplitude"] = self.form_widgets["ac_amplitude"].value()
             # Also update value to DC level
             self.result_properties["value"] = self.result_properties["dc_level"]
+        
+        elif self.component.ctype == "I":
+            # Current source: value already handled above
+            pass
+        
+        elif self.component.ctype == "L":
+            # Inductor: value already handled above
+            pass
+        
+        elif self.component.ctype == "D":
+            # Collect diode properties
+            if "model" in self.form_widgets:
+                model_name = self.form_widgets["model"].text().strip()
+                if model_name:
+                    self.result_properties["model"] = model_name
+                elif "model" in self.component.extra:
+                    # Clear model if field is empty
+                    self.result_properties["model"] = None
+        
+        elif self.component.ctype == "Q":
+            # Collect BJT properties
+            if "polarity" in self.form_widgets:
+                self.result_properties["polarity"] = self.form_widgets["polarity"].currentText()
+            if "model" in self.form_widgets:
+                model_name = self.form_widgets["model"].text().strip()
+                if model_name:
+                    self.result_properties["model"] = model_name
+                elif "model" in self.component.extra:
+                    self.result_properties["model"] = None
+        
+        elif self.component.ctype == "M":
+            # Collect MOSFET properties
+            if "mos_type" in self.form_widgets:
+                self.result_properties["mos_type"] = self.form_widgets["mos_type"].currentText()
+            if "model" in self.form_widgets:
+                model_name = self.form_widgets["model"].text().strip()
+                if model_name:
+                    self.result_properties["model"] = model_name
+                elif "model" in self.component.extra:
+                    self.result_properties["model"] = None
+        
+        elif self.component.ctype == "G":
+            # VCCS: value (transconductance) already handled above
+            pass
         
         super().accept()
 

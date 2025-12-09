@@ -152,7 +152,13 @@ def circuit_to_spice_netlist(circuit: Circuit) -> str:
     Supports:
     - Resistors (R)
     - Capacitors (C)
+    - Inductors (L)
+    - Diodes (D)
+    - BJTs (Q)
+    - MOSFETs (M)
     - Voltage sources (V)
+    - Current sources (I)
+    - Voltage-controlled current sources (G)
     - Op-amps (OPAMP) - uses internal macromodel or vendor model
     """
     lines: List[str] = [f"* Netlist for circuit: {circuit.name}"]
@@ -160,6 +166,9 @@ def circuit_to_spice_netlist(circuit: Circuit) -> str:
 
     # Process components
     opamps: List[Component] = []
+    diodes: List[Component] = []
+    bjts: List[Component] = []
+    mosfets: List[Component] = []
     
     for comp in circuit.components:
         if comp.ctype == "R":
@@ -170,6 +179,43 @@ def circuit_to_spice_netlist(circuit: Circuit) -> str:
             # CAPACITOR: C<ref> node1 node2 value
             lines.append(f"{comp.ref} {comp.node1} {comp.node2} {comp.value}")
         
+        elif comp.ctype == "L":
+            # INDUCTOR: L<ref> node1 node2 value
+            lines.append(f"{comp.ref} {comp.node1} {comp.node2} {comp.value}")
+        
+        elif comp.ctype == "D":
+            # DIODE: D<ref> anode cathode model_name
+            diodes.append(comp)
+            model_name = comp.extra.get("model", "DDEFAULT")
+            lines.append(f"{comp.ref} {comp.node1} {comp.node2} {model_name}")
+        
+        elif comp.ctype == "Q":
+            # BJT: Q<ref> collector base emitter model_name
+            bjts.append(comp)
+            base_node = comp.extra.get("base_node", "")
+            if not base_node:
+                raise ValueError(f"BJT {comp.ref} missing base_node in extra dict")
+            model_name = comp.extra.get("model")
+            if not model_name:
+                # Use default model based on polarity
+                polarity = comp.extra.get("polarity", "NPN")
+                model_name = "QNPN" if str(polarity).upper() == "NPN" else "QPNP"
+            lines.append(f"{comp.ref} {comp.node1} {base_node} {comp.node2} {model_name}")
+        
+        elif comp.ctype == "M":
+            # MOSFET: M<ref> drain gate source bulk model_name
+            mosfets.append(comp)
+            gate_node = comp.extra.get("gate_node", "")
+            bulk_node = comp.extra.get("bulk_node", comp.node2)  # Default to source if not specified
+            if not gate_node:
+                raise ValueError(f"MOSFET {comp.ref} missing gate_node in extra dict")
+            model_name = comp.extra.get("model")
+            if not model_name:
+                # Use default model based on type
+                mos_type = comp.extra.get("mos_type", "NMOS")
+                model_name = "NMOS_DEFAULT" if str(mos_type).upper() == "NMOS" else "PMOS_DEFAULT"
+            lines.append(f"{comp.ref} {comp.node1} {gate_node} {comp.node2} {bulk_node} {model_name}")
+        
         elif comp.ctype == "V":
             # VOLTAGE SOURCE: V<ref> node+ node- DC value
             # For AC analysis, we'll add AC 1 later if needed
@@ -179,9 +225,21 @@ def circuit_to_spice_netlist(circuit: Circuit) -> str:
             # CURRENT SOURCE: I<ref> node+ node- DC value
             lines.append(f"{comp.ref} {comp.node1} {comp.node2} DC {comp.value}")
         
+        elif comp.ctype == "G":
+            # VOLTAGE-CONTROLLED CURRENT SOURCE: G<ref> np nn vp vn value
+            ctrl_p = comp.extra.get("ctrl_p", "")
+            ctrl_n = comp.extra.get("ctrl_n", "")
+            if not ctrl_p or not ctrl_n:
+                raise ValueError(f"VCCS {comp.ref} missing ctrl_p or ctrl_n in extra dict")
+            lines.append(f"{comp.ref} {comp.node1} {comp.node2} {ctrl_p} {ctrl_n} {comp.value}")
+        
         elif comp.ctype == "OPAMP":
             # Op-amp: store for special handling
             opamps.append(comp)
+        
+        elif comp.ctype in ("GND", "VOUT"):
+            # Markers - no netlist lines needed
+            pass
         
         else:
             # Unknown component type
@@ -189,19 +247,25 @@ def circuit_to_spice_netlist(circuit: Circuit) -> str:
     
     # Handle op-amps (emit op-amp blocks)
     for opamp in opamps:
-        # Get output node from extra dict
-        out_node = opamp.extra.get("output_node", "Vout")
-        
-        # Create a temporary circuit with just this op-amp for _emit_opamp_block
-        # We need to map the op-amp's nodes to the expected names
-        temp_circuit = Circuit(name="temp")
-        temp_circuit.metadata = circuit.metadata.copy()
-        
-        # Map op-amp nodes to expected names for _emit_opamp_block
-        # The function expects Vplus, Vminus, Vout
-        # We'll create a mapping or modify the function to be more general
-        # For now, let's create a general op-amp emitter
         _emit_general_opamp_block(lines, opamp, circuit.metadata)
+    
+    # Emit default models if needed (before .end)
+    has_default_diode = any(d.extra.get("model") == "DDEFAULT" or "model" not in d.extra for d in diodes)
+    has_default_bjt_npn = any(q.extra.get("model") == "QNPN" or (not q.extra.get("model") and str(q.extra.get("polarity", "NPN")).upper() == "NPN") for q in bjts)
+    has_default_bjt_pnp = any(q.extra.get("model") == "QPNP" or (not q.extra.get("model") and str(q.extra.get("polarity", "PNP")).upper() == "PNP") for q in bjts)
+    has_default_mos_nmos = any(m.extra.get("model") == "NMOS_DEFAULT" or (not m.extra.get("model") and str(m.extra.get("mos_type", "NMOS")).upper() == "NMOS") for m in mosfets)
+    has_default_mos_pmos = any(m.extra.get("model") == "PMOS_DEFAULT" or (not m.extra.get("model") and str(m.extra.get("mos_type", "PMOS")).upper() == "PMOS") for m in mosfets)
+    
+    if has_default_diode:
+        lines.append(".model DDEFAULT D(Is=1e-14 N=1)")
+    if has_default_bjt_npn:
+        lines.append(".model QNPN NPN (BF=100 IS=1e-14)")
+    if has_default_bjt_pnp:
+        lines.append(".model QPNP PNP (BF=100 IS=1e-14)")
+    if has_default_mos_nmos:
+        lines.append(".model NMOS_DEFAULT NMOS (LEVEL=1 VTO=1 KP=1e-3)")
+    if has_default_mos_pmos:
+        lines.append(".model PMOS_DEFAULT PMOS (LEVEL=1 VTO=-1 KP=5e-4)")
     
     lines.append("")
     lines.append(".end")
@@ -282,20 +346,87 @@ def build_general_ac_netlist(
 
     # Add all components
     opamps: List[Component] = []
+    diodes: List[Component] = []
+    bjts: List[Component] = []
+    mosfets: List[Component] = []
+    
     for comp in circuit.components:
         if comp.ctype == "R":
             lines.append(f"{comp.ref} {comp.node1} {comp.node2} {comp.value}")
         elif comp.ctype == "C":
             lines.append(f"{comp.ref} {comp.node1} {comp.node2} {comp.value}")
+        elif comp.ctype == "L":
+            lines.append(f"{comp.ref} {comp.node1} {comp.node2} {comp.value}")
+        elif comp.ctype == "D":
+            diodes.append(comp)
+            model_name = comp.extra.get("model", "DDEFAULT")
+            lines.append(f"{comp.ref} {comp.node1} {comp.node2} {model_name}")
+        elif comp.ctype == "Q":
+            bjts.append(comp)
+            base_node = comp.extra.get("base_node", "")
+            model_name = comp.extra.get("model")
+            if not model_name:
+                polarity = comp.extra.get("polarity", "NPN")
+                model_name = "QNPN" if str(polarity).upper() == "NPN" else "QPNP"
+            lines.append(f"{comp.ref} {comp.node1} {base_node} {comp.node2} {model_name}")
+        elif comp.ctype == "M":
+            mosfets.append(comp)
+            gate_node = comp.extra.get("gate_node", "")
+            bulk_node = comp.extra.get("bulk_node", comp.node2)
+            model_name = comp.extra.get("model")
+            if not model_name:
+                mos_type = comp.extra.get("mos_type", "NMOS")
+                model_name = "NMOS_DEFAULT" if str(mos_type).upper() == "NMOS" else "PMOS_DEFAULT"
+            lines.append(f"{comp.ref} {comp.node1} {gate_node} {comp.node2} {bulk_node} {model_name}")
         elif comp.ctype == "V":
             # Already handled above
             pass
+        elif comp.ctype == "I":
+            lines.append(f"{comp.ref} {comp.node1} {comp.node2} DC {comp.value}")
+        elif comp.ctype == "G":
+            ctrl_p = comp.extra.get("ctrl_p", "")
+            ctrl_n = comp.extra.get("ctrl_n", "")
+            lines.append(f"{comp.ref} {comp.node1} {comp.node2} {ctrl_p} {ctrl_n} {comp.value}")
         elif comp.ctype == "OPAMP":
             opamps.append(comp)
     
     # Emit op-amp blocks
     for opamp in opamps:
         _emit_general_opamp_block(lines, opamp, circuit.metadata)
+
+    # Emit default models if needed
+    has_default_diode = any(d.extra.get("model") == "DDEFAULT" or "model" not in d.extra for d in diodes)
+    has_default_bjt_npn = any(q.extra.get("model") == "QNPN" or (not q.extra.get("model") and str(q.extra.get("polarity", "NPN")).upper() == "NPN") for q in bjts)
+    has_default_bjt_pnp = any(q.extra.get("model") == "QPNP" or (not q.extra.get("model") and str(q.extra.get("polarity", "PNP")).upper() == "PNP") for q in bjts)
+    has_default_mos_nmos = any(m.extra.get("model") == "NMOS_DEFAULT" or (not m.extra.get("model") and str(m.extra.get("mos_type", "NMOS")).upper() == "NMOS") for m in mosfets)
+    has_default_mos_pmos = any(m.extra.get("model") == "PMOS_DEFAULT" or (not m.extra.get("model") and str(m.extra.get("mos_type", "PMOS")).upper() == "PMOS") for m in mosfets)
+    
+    if has_default_diode:
+        lines.append(".model DDEFAULT D(Is=1e-14 N=1)")
+    if has_default_bjt_npn:
+        lines.append(".model QNPN NPN (BF=100 IS=1e-14)")
+    if has_default_bjt_pnp:
+        lines.append(".model QPNP PNP (BF=100 IS=1e-14)")
+    if has_default_mos_nmos:
+        lines.append(".model NMOS_DEFAULT NMOS (LEVEL=1 VTO=1 KP=1e-3)")
+    if has_default_mos_pmos:
+        lines.append(".model PMOS_DEFAULT PMOS (LEVEL=1 VTO=-1 KP=5e-4)")
+    has_default_diode = any(d.extra.get("model") == "DDEFAULT" or "model" not in d.extra for d in diodes)
+    has_default_bjt_npn = any(q.extra.get("model") == "QNPN" or (not q.extra.get("model") and str(q.extra.get("polarity", "NPN")).upper() == "NPN") for q in bjts)
+    has_default_bjt_pnp = any(q.extra.get("model") == "QPNP" or (not q.extra.get("model") and str(q.extra.get("polarity", "PNP")).upper() == "PNP") for q in bjts)
+    has_default_mos_nmos = any(m.extra.get("model") == "NMOS_DEFAULT" or (not m.extra.get("model") and str(m.extra.get("mos_type", "NMOS")).upper() == "NMOS") for m in mosfets)
+    has_default_mos_pmos = any(m.extra.get("model") == "PMOS_DEFAULT" or (not m.extra.get("model") and str(m.extra.get("mos_type", "PMOS")).upper() == "PMOS") for m in mosfets)
+    
+    if has_default_diode:
+        lines.append(".model DDEFAULT D(Is=1e-14 N=1)")
+    if has_default_bjt_npn:
+        lines.append(".model QNPN NPN (BF=100 IS=1e-14)")
+    if has_default_bjt_pnp:
+        lines.append(".model QPNP PNP (BF=100 IS=1e-14)")
+    if has_default_mos_nmos:
+        lines.append(".model NMOS_DEFAULT NMOS (LEVEL=1 VTO=1 KP=1e-3)")
+    if has_default_mos_pmos:
+        lines.append(".model PMOS_DEFAULT PMOS (LEVEL=1 VTO=-1 KP=5e-4)")
 
     # AC analysis
     lines.append("")
@@ -348,20 +479,71 @@ def build_ac_sweep_netlist(
 
     # Add all components
     opamps: List[Component] = []
+    diodes: List[Component] = []
+    bjts: List[Component] = []
+    mosfets: List[Component] = []
+    
     for comp in circuit.components:
         if comp.ctype == "R":
             lines.append(f"{comp.ref} {comp.node1} {comp.node2} {comp.value}")
         elif comp.ctype == "C":
             lines.append(f"{comp.ref} {comp.node1} {comp.node2} {comp.value}")
+        elif comp.ctype == "L":
+            lines.append(f"{comp.ref} {comp.node1} {comp.node2} {comp.value}")
+        elif comp.ctype == "D":
+            diodes.append(comp)
+            model_name = comp.extra.get("model", "DDEFAULT")
+            lines.append(f"{comp.ref} {comp.node1} {comp.node2} {model_name}")
+        elif comp.ctype == "Q":
+            bjts.append(comp)
+            base_node = comp.extra.get("base_node", "")
+            model_name = comp.extra.get("model")
+            if not model_name:
+                polarity = comp.extra.get("polarity", "NPN")
+                model_name = "QNPN" if str(polarity).upper() == "NPN" else "QPNP"
+            lines.append(f"{comp.ref} {comp.node1} {base_node} {comp.node2} {model_name}")
+        elif comp.ctype == "M":
+            mosfets.append(comp)
+            gate_node = comp.extra.get("gate_node", "")
+            bulk_node = comp.extra.get("bulk_node", comp.node2)
+            model_name = comp.extra.get("model")
+            if not model_name:
+                mos_type = comp.extra.get("mos_type", "NMOS")
+                model_name = "NMOS_DEFAULT" if str(mos_type).upper() == "NMOS" else "PMOS_DEFAULT"
+            lines.append(f"{comp.ref} {comp.node1} {gate_node} {comp.node2} {bulk_node} {model_name}")
         elif comp.ctype == "V":
             # Already handled above
             pass
+        elif comp.ctype == "I":
+            lines.append(f"{comp.ref} {comp.node1} {comp.node2} DC {comp.value}")
+        elif comp.ctype == "G":
+            ctrl_p = comp.extra.get("ctrl_p", "")
+            ctrl_n = comp.extra.get("ctrl_n", "")
+            lines.append(f"{comp.ref} {comp.node1} {comp.node2} {ctrl_p} {ctrl_n} {comp.value}")
         elif comp.ctype == "OPAMP":
             opamps.append(comp)
     
     # Emit op-amp blocks
     for opamp in opamps:
         _emit_general_opamp_block(lines, opamp, circuit.metadata)
+
+    # Emit default models if needed
+    has_default_diode = any(d.extra.get("model") == "DDEFAULT" or "model" not in d.extra for d in diodes)
+    has_default_bjt_npn = any(q.extra.get("model") == "QNPN" or (not q.extra.get("model") and str(q.extra.get("polarity", "NPN")).upper() == "NPN") for q in bjts)
+    has_default_bjt_pnp = any(q.extra.get("model") == "QPNP" or (not q.extra.get("model") and str(q.extra.get("polarity", "PNP")).upper() == "PNP") for q in bjts)
+    has_default_mos_nmos = any(m.extra.get("model") == "NMOS_DEFAULT" or (not m.extra.get("model") and str(m.extra.get("mos_type", "NMOS")).upper() == "NMOS") for m in mosfets)
+    has_default_mos_pmos = any(m.extra.get("model") == "PMOS_DEFAULT" or (not m.extra.get("model") and str(m.extra.get("mos_type", "PMOS")).upper() == "PMOS") for m in mosfets)
+    
+    if has_default_diode:
+        lines.append(".model DDEFAULT D(Is=1e-14 N=1)")
+    if has_default_bjt_npn:
+        lines.append(".model QNPN NPN (BF=100 IS=1e-14)")
+    if has_default_bjt_pnp:
+        lines.append(".model QPNP PNP (BF=100 IS=1e-14)")
+    if has_default_mos_nmos:
+        lines.append(".model NMOS_DEFAULT NMOS (LEVEL=1 VTO=1 KP=1e-3)")
+    if has_default_mos_pmos:
+        lines.append(".model PMOS_DEFAULT PMOS (LEVEL=1 VTO=-1 KP=5e-4)")
 
     lines.append("")
     lines.append(f".ac dec {points} {f_start} {f_stop}")
@@ -406,6 +588,10 @@ def build_dc_netlist(circuit: Circuit) -> str:
     
     # Add all components
     opamps: List[Component] = []
+    diodes: List[Component] = []
+    bjts: List[Component] = []
+    mosfets: List[Component] = []
+    
     for comp in circuit.components:
         if comp.ctype == "R":
             lines.append(f"{comp.ref} {comp.node1} {comp.node2} {comp.value}")
@@ -414,18 +600,66 @@ def build_dc_netlist(circuit: Circuit) -> str:
             # We can either omit them or add them with very large value
             # For now, we'll omit them (they don't affect DC)
             pass
+        elif comp.ctype == "L":
+            # For DC analysis, inductors are short circuits
+            # We can either omit them or replace with small resistance
+            # For now, we'll omit them (treat as short circuit)
+            pass
+        elif comp.ctype == "D":
+            diodes.append(comp)
+            model_name = comp.extra.get("model", "DDEFAULT")
+            lines.append(f"{comp.ref} {comp.node1} {comp.node2} {model_name}")
+        elif comp.ctype == "Q":
+            bjts.append(comp)
+            base_node = comp.extra.get("base_node", "")
+            model_name = comp.extra.get("model")
+            if not model_name:
+                polarity = comp.extra.get("polarity", "NPN")
+                model_name = "QNPN" if str(polarity).upper() == "NPN" else "QPNP"
+            lines.append(f"{comp.ref} {comp.node1} {base_node} {comp.node2} {model_name}")
+        elif comp.ctype == "M":
+            mosfets.append(comp)
+            gate_node = comp.extra.get("gate_node", "")
+            bulk_node = comp.extra.get("bulk_node", comp.node2)
+            model_name = comp.extra.get("model")
+            if not model_name:
+                mos_type = comp.extra.get("mos_type", "NMOS")
+                model_name = "NMOS_DEFAULT" if str(mos_type).upper() == "NMOS" else "PMOS_DEFAULT"
+            lines.append(f"{comp.ref} {comp.node1} {gate_node} {comp.node2} {bulk_node} {model_name}")
         elif comp.ctype == "V":
             # Already handled above
             pass
         elif comp.ctype == "I":
             # CURRENT SOURCE: I<ref> node+ node- DC value
             lines.append(f"{comp.ref} {comp.node1} {comp.node2} DC {comp.value}")
+        elif comp.ctype == "G":
+            ctrl_p = comp.extra.get("ctrl_p", "")
+            ctrl_n = comp.extra.get("ctrl_n", "")
+            lines.append(f"{comp.ref} {comp.node1} {comp.node2} {ctrl_p} {ctrl_n} {comp.value}")
         elif comp.ctype == "OPAMP":
             opamps.append(comp)
     
     # Emit op-amp blocks
     for opamp in opamps:
         _emit_general_opamp_block(lines, opamp, circuit.metadata)
+    
+    # Emit default models if needed
+    has_default_diode = any(d.extra.get("model") == "DDEFAULT" or "model" not in d.extra for d in diodes)
+    has_default_bjt_npn = any(q.extra.get("model") == "QNPN" or (not q.extra.get("model") and str(q.extra.get("polarity", "NPN")).upper() == "NPN") for q in bjts)
+    has_default_bjt_pnp = any(q.extra.get("model") == "QPNP" or (not q.extra.get("model") and str(q.extra.get("polarity", "PNP")).upper() == "PNP") for q in bjts)
+    has_default_mos_nmos = any(m.extra.get("model") == "NMOS_DEFAULT" or (not m.extra.get("model") and str(m.extra.get("mos_type", "NMOS")).upper() == "NMOS") for m in mosfets)
+    has_default_mos_pmos = any(m.extra.get("model") == "PMOS_DEFAULT" or (not m.extra.get("model") and str(m.extra.get("mos_type", "PMOS")).upper() == "PMOS") for m in mosfets)
+    
+    if has_default_diode:
+        lines.append(".model DDEFAULT D(Is=1e-14 N=1)")
+    if has_default_bjt_npn:
+        lines.append(".model QNPN NPN (BF=100 IS=1e-14)")
+    if has_default_bjt_pnp:
+        lines.append(".model QPNP PNP (BF=100 IS=1e-14)")
+    if has_default_mos_nmos:
+        lines.append(".model NMOS_DEFAULT NMOS (LEVEL=1 VTO=1 KP=1e-3)")
+    if has_default_mos_pmos:
+        lines.append(".model PMOS_DEFAULT PMOS (LEVEL=1 VTO=-1 KP=5e-4)")
     
     # DC operating point analysis
     lines.append("")
@@ -466,20 +700,71 @@ def build_noise_netlist(
 
     # Add all components
     opamps: List[Component] = []
+    diodes: List[Component] = []
+    bjts: List[Component] = []
+    mosfets: List[Component] = []
+    
     for comp in circuit.components:
         if comp.ctype == "R":
             lines.append(f"{comp.ref} {comp.node1} {comp.node2} {comp.value}")
         elif comp.ctype == "C":
             lines.append(f"{comp.ref} {comp.node1} {comp.node2} {comp.value}")
+        elif comp.ctype == "L":
+            lines.append(f"{comp.ref} {comp.node1} {comp.node2} {comp.value}")
+        elif comp.ctype == "D":
+            diodes.append(comp)
+            model_name = comp.extra.get("model", "DDEFAULT")
+            lines.append(f"{comp.ref} {comp.node1} {comp.node2} {model_name}")
+        elif comp.ctype == "Q":
+            bjts.append(comp)
+            base_node = comp.extra.get("base_node", "")
+            model_name = comp.extra.get("model")
+            if not model_name:
+                polarity = comp.extra.get("polarity", "NPN")
+                model_name = "QNPN" if str(polarity).upper() == "NPN" else "QPNP"
+            lines.append(f"{comp.ref} {comp.node1} {base_node} {comp.node2} {model_name}")
+        elif comp.ctype == "M":
+            mosfets.append(comp)
+            gate_node = comp.extra.get("gate_node", "")
+            bulk_node = comp.extra.get("bulk_node", comp.node2)
+            model_name = comp.extra.get("model")
+            if not model_name:
+                mos_type = comp.extra.get("mos_type", "NMOS")
+                model_name = "NMOS_DEFAULT" if str(mos_type).upper() == "NMOS" else "PMOS_DEFAULT"
+            lines.append(f"{comp.ref} {comp.node1} {gate_node} {comp.node2} {bulk_node} {model_name}")
         elif comp.ctype == "V":
             # Already handled above
             pass
+        elif comp.ctype == "I":
+            lines.append(f"{comp.ref} {comp.node1} {comp.node2} DC {comp.value}")
+        elif comp.ctype == "G":
+            ctrl_p = comp.extra.get("ctrl_p", "")
+            ctrl_n = comp.extra.get("ctrl_n", "")
+            lines.append(f"{comp.ref} {comp.node1} {comp.node2} {ctrl_p} {ctrl_n} {comp.value}")
         elif comp.ctype == "OPAMP":
             opamps.append(comp)
     
     # Emit op-amp blocks
     for opamp in opamps:
         _emit_general_opamp_block(lines, opamp, circuit.metadata)
+
+    # Emit default models if needed
+    has_default_diode = any(d.extra.get("model") == "DDEFAULT" or "model" not in d.extra for d in diodes)
+    has_default_bjt_npn = any(q.extra.get("model") == "QNPN" or (not q.extra.get("model") and str(q.extra.get("polarity", "NPN")).upper() == "NPN") for q in bjts)
+    has_default_bjt_pnp = any(q.extra.get("model") == "QPNP" or (not q.extra.get("model") and str(q.extra.get("polarity", "PNP")).upper() == "PNP") for q in bjts)
+    has_default_mos_nmos = any(m.extra.get("model") == "NMOS_DEFAULT" or (not m.extra.get("model") and str(m.extra.get("mos_type", "NMOS")).upper() == "NMOS") for m in mosfets)
+    has_default_mos_pmos = any(m.extra.get("model") == "PMOS_DEFAULT" or (not m.extra.get("model") and str(m.extra.get("mos_type", "PMOS")).upper() == "PMOS") for m in mosfets)
+    
+    if has_default_diode:
+        lines.append(".model DDEFAULT D(Is=1e-14 N=1)")
+    if has_default_bjt_npn:
+        lines.append(".model QNPN NPN (BF=100 IS=1e-14)")
+    if has_default_bjt_pnp:
+        lines.append(".model QPNP PNP (BF=100 IS=1e-14)")
+    if has_default_mos_nmos:
+        lines.append(".model NMOS_DEFAULT NMOS (LEVEL=1 VTO=1 KP=1e-3)")
+    if has_default_mos_pmos:
+        lines.append(".model PMOS_DEFAULT PMOS (LEVEL=1 VTO=-1 KP=5e-4)")
 
     # Use a control block so we can use ngspice 'noise' and 'print' commands
     lines.append("")

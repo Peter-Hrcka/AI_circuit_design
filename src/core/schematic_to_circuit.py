@@ -170,7 +170,7 @@ def circuit_from_schematic(model: SchematicModel) -> Circuit:
     This is a general converter that works for any topology:
     - Each component contributes its type, value, and node connections
     - Nets from schematic pins become circuit nodes
-    - Supports: R, C, V, OPAMP, GND, VOUT components
+    - Supports: R, C, L, D, Q, M, V, I, G, OPAMP, GND, VOUT components
     
     Args:
         model: SchematicModel to convert
@@ -214,6 +214,192 @@ def circuit_from_schematic(model: SchematicModel) -> Circuit:
                 node2=n2,
                 value=float(comp.value),
                 unit="F",
+            ))
+        
+        elif comp.ctype == "L":
+            # Inductor: 2-pin component
+            if len(comp.pins) != 2:
+                raise ValueError(f"Inductor {comp.ref} must have 2 pins, has {len(comp.pins)}")
+            n1, n2 = _get_two_pin_nets(comp)
+            circuit.components.append(Component(
+                ref=comp.ref,
+                ctype="L",
+                node1=n1,
+                node2=n2,
+                value=float(comp.value),
+                unit="H",
+            ))
+        
+        elif comp.ctype == "D":
+            # Diode: 2-pin component (anode, cathode)
+            if len(comp.pins) != 2:
+                raise ValueError(f"Diode {comp.ref} must have 2 pins, has {len(comp.pins)}")
+            
+            # Find anode and cathode pins by name, or use first/second pin
+            anode_net = None
+            cathode_net = None
+            for pin in comp.pins:
+                if pin.name.upper() == "A" or pin.name.upper() == "ANODE":
+                    anode_net = _canon_net(pin.net or "")
+                elif pin.name.upper() == "K" or pin.name.upper() == "CATHODE":
+                    cathode_net = _canon_net(pin.net or "")
+            
+            # If not found by name, use first pin as anode, second as cathode
+            if anode_net is None or cathode_net is None:
+                anode_net = _canon_net(comp.pins[0].net or "")
+                cathode_net = _canon_net(comp.pins[1].net or "")
+            
+            extra = {}
+            if "model" in comp.extra:
+                extra["model"] = str(comp.extra["model"])
+            
+            circuit.components.append(Component(
+                ref=comp.ref,
+                ctype="D",
+                node1=anode_net,  # anode
+                node2=cathode_net,  # cathode
+                value=0.0,  # unused for diodes
+                unit="",
+                extra=extra,
+            ))
+        
+        elif comp.ctype == "Q" or comp.ctype == "BJT":
+            # BJT transistor: 3-pin component (collector, base, emitter)
+            if len(comp.pins) < 3:
+                raise ValueError(f"BJT {comp.ref} must have at least 3 pins, has {len(comp.pins)}")
+            
+            collector_net = None
+            base_net = None
+            emitter_net = None
+            
+            # Find pins by name
+            for pin in comp.pins:
+                pin_name_upper = pin.name.upper()
+                if pin_name_upper == "C" or pin_name_upper == "COLLECTOR":
+                    collector_net = _canon_net(pin.net or "")
+                elif pin_name_upper == "B" or pin_name_upper == "BASE":
+                    base_net = _canon_net(pin.net or "")
+                elif pin_name_upper == "E" or pin_name_upper == "EMITTER":
+                    emitter_net = _canon_net(pin.net or "")
+            
+            # If not found by name, use first 3 pins in order: collector, base, emitter
+            if collector_net is None or base_net is None or emitter_net is None:
+                collector_net = _canon_net(comp.pins[0].net or "")
+                base_net = _canon_net(comp.pins[1].net or "")
+                emitter_net = _canon_net(comp.pins[2].net or "")
+            
+            extra = {
+                "base_node": base_net,
+                "polarity": str(comp.extra.get("polarity", "NPN")),
+            }
+            if "model" in comp.extra:
+                extra["model"] = str(comp.extra["model"])
+            
+            circuit.components.append(Component(
+                ref=comp.ref,
+                ctype="Q",
+                node1=collector_net,
+                node2=emitter_net,
+                value=1.0,  # unused for BJTs
+                unit="",
+                extra=extra,
+            ))
+        
+        elif comp.ctype == "M" or comp.ctype == "MOSFET":
+            # MOSFET: 3 or 4-pin component (drain, gate, source, bulk)
+            if len(comp.pins) < 3:
+                raise ValueError(f"MOSFET {comp.ref} must have at least 3 pins, has {len(comp.pins)}")
+            
+            drain_net = None
+            gate_net = None
+            source_net = None
+            bulk_net = None
+            
+            # Find pins by name
+            for pin in comp.pins:
+                pin_name_upper = pin.name.upper()
+                if pin_name_upper == "D" or pin_name_upper == "DRAIN":
+                    drain_net = _canon_net(pin.net or "")
+                elif pin_name_upper == "G" or pin_name_upper == "GATE":
+                    gate_net = _canon_net(pin.net or "")
+                elif pin_name_upper == "S" or pin_name_upper == "SOURCE":
+                    source_net = _canon_net(pin.net or "")
+                elif pin_name_upper == "B" or pin_name_upper == "BULK" or pin_name_upper == "SUBSTRATE":
+                    bulk_net = _canon_net(pin.net or "")
+            
+            # If not found by name, use first 3 or 4 pins in order
+            if drain_net is None or gate_net is None or source_net is None:
+                drain_net = _canon_net(comp.pins[0].net or "")
+                gate_net = _canon_net(comp.pins[1].net or "")
+                source_net = _canon_net(comp.pins[2].net or "")
+                if len(comp.pins) >= 4:
+                    bulk_net = _canon_net(comp.pins[3].net or "")
+            
+            extra = {
+                "gate_node": gate_net,
+                "mos_type": str(comp.extra.get("mos_type", "NMOS")),
+            }
+            if bulk_net:
+                extra["bulk_node"] = bulk_net
+            else:
+                # If no bulk node, default to source (common in 3-terminal MOSFETs)
+                extra["bulk_node"] = source_net
+            
+            if "model" in comp.extra:
+                extra["model"] = str(comp.extra["model"])
+            
+            circuit.components.append(Component(
+                ref=comp.ref,
+                ctype="M",
+                node1=drain_net,
+                node2=source_net,
+                value=1.0,  # unused for MOSFETs
+                unit="",
+                extra=extra,
+            ))
+        
+        elif comp.ctype == "G" or comp.ctype == "VCCS":
+            # Voltage-controlled current source (VCCS): 4-pin component
+            if len(comp.pins) < 4:
+                raise ValueError(f"VCCS {comp.ref} must have 4 pins, has {len(comp.pins)}")
+            
+            ip_net = None  # output current positive
+            in_net = None  # output current negative
+            vp_net = None  # control voltage positive
+            vn_net = None  # control voltage negative
+            
+            # Find pins by name
+            for pin in comp.pins:
+                pin_name_upper = pin.name.upper()
+                if pin_name_upper == "IP" or pin_name_upper == "IPOS" or pin_name_upper == "I+":
+                    ip_net = _canon_net(pin.net or "")
+                elif pin_name_upper == "IN" or pin_name_upper == "INEG" or pin_name_upper == "I-":
+                    in_net = _canon_net(pin.net or "")
+                elif pin_name_upper == "VP" or pin_name_upper == "VPOS" or pin_name_upper == "V+":
+                    vp_net = _canon_net(pin.net or "")
+                elif pin_name_upper == "VN" or pin_name_upper == "VNEG" or pin_name_upper == "V-":
+                    vn_net = _canon_net(pin.net or "")
+            
+            # If not found by name, use first 4 pins in order: IP, IN, VP, VN
+            if ip_net is None or in_net is None or vp_net is None or vn_net is None:
+                ip_net = _canon_net(comp.pins[0].net or "")
+                in_net = _canon_net(comp.pins[1].net or "")
+                vp_net = _canon_net(comp.pins[2].net or "")
+                vn_net = _canon_net(comp.pins[3].net or "")
+            
+            extra = {
+                "ctrl_p": vp_net,
+                "ctrl_n": vn_net,
+            }
+            
+            circuit.components.append(Component(
+                ref=comp.ref,
+                ctype="G",
+                node1=ip_net,
+                node2=in_net,
+                value=float(comp.value),  # transconductance in siemens
+                unit="S",
+                extra=extra,
             ))
         
         elif comp.ctype == "V":

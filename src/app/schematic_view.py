@@ -1,8 +1,12 @@
 # src/app/schematic_view.py
 
 from PySide6.QtWidgets import QGraphicsView, QGraphicsScene, QGraphicsLineItem, QGraphicsEllipseItem, QGraphicsTextItem, QGraphicsPolygonItem, QGraphicsRectItem
-from PySide6.QtGui import QPen, QPainter, QBrush, QColor, QPolygonF
+from PySide6.QtSvgWidgets import QGraphicsSvgItem
+from PySide6.QtGui import QPen, QPainter, QBrush, QColor, QPolygonF, QTransform
 from PySide6.QtCore import Qt, QRectF, QPointF, Signal
+from PySide6.QtSvg import QSvgRenderer
+from pathlib import Path
+from math import atan2, degrees, sqrt
 
 from core.schematic_model import (
     SchematicModel,
@@ -100,6 +104,11 @@ class SchematicView(QGraphicsView):
         self._component_ref_counters = {
             "R": 0,
             "C": 0,
+            "L": 0,
+            "D": 0,
+            "Q": 0,
+            "M": 0,
+            "G": 0,
             "OPAMP": 0,
             "V": 0,
             "I": 0,
@@ -107,8 +116,46 @@ class SchematicView(QGraphicsView):
             "VOUT": 0,
         }
         
+        # SVG symbol renderer cache
+        self._svg_renderers: dict[str, QSvgRenderer] = {}
+        self._load_svg_symbols()
+        
         # Set drag mode based on initial mode
         self._update_drag_mode()
+
+    def _load_svg_symbols(self):
+        """Load SVG symbols from resources/symbols directory."""
+        # Map component types to SVG filenames
+        symbol_map = {
+            "R": "passive_resistor.svg",
+            "C": "passive_capacitor.svg",
+            "L": "passive_inductor.svg",
+            "D": "diode_standard.svg",
+            "Q": "transistor_npn.svg",  # Default to NPN, can be overridden
+            "Q_NPN": "transistor_npn.svg",
+            "Q_PNP": "transistor_pnp.svg",
+            "M": "transistor_nmos.svg",  # Default to NMOS, can be overridden
+            "M_NMOS": "transistor_nmos.svg",
+            "M_PMOS": "transistor_pmos.svg",
+            "G": "controlled_vccs.svg",
+            "OPAMP": "ic_opamp.svg",
+            "V": "source_dc.svg",
+            "I": "source_current.svg",
+            "GND": "passive_ground.svg",
+            "VOUT": "label_output.svg",
+        }
+        
+        base_dir = Path(__file__).parent.parent
+        symbols_dir = base_dir / "resources" / "symbols"
+        
+        for ctype, filename in symbol_map.items():
+            svg_path = symbols_dir / filename
+            if svg_path.exists():
+                renderer = QSvgRenderer(str(svg_path))
+                if renderer.isValid():
+                    self._svg_renderers[ctype] = renderer
+            else:
+                print(f"Warning: SVG symbol not found: {svg_path}")
 
         # Auto net name generator for wires created by the user
         self._next_auto_net_id: int = 1
@@ -120,6 +167,9 @@ class SchematicView(QGraphicsView):
         # Preview wire (temporary wire while dragging) - list for Manhattan routing segments
         self._preview_wire_item = []
         self._preview_wire_start = None
+        
+        # Preview component (temporary component while placing)
+        self._preview_component_items = []  # List of items to clear
         
         # Component dragging state
         self._dragging_component = None
@@ -311,7 +361,374 @@ class SchematicView(QGraphicsView):
                         scene.addItem(rect_item)
 
     def _draw_component(self, comp: SchematicComponent):
-        """Draw a single component."""
+        """Draw a single component using SVG symbols."""
+        # Use SVG-based rendering for all components
+        self._draw_component_svg(comp)
+    
+    def _draw_component_svg(self, comp: SchematicComponent):
+        """
+        Draw a component using its SVG symbol.
+        
+        For 2-pin components (R, C, L, D, V, I): Anchors SVG left connection point to pin1
+        and right connection point to pin2, scaling and rotating to match pin positions.
+        
+        For multi-pin components: Centers symbol on pin centroid (snapped to grid).
+        """
+        scene = self.scene()
+        
+        # Determine SVG key based on component type and properties
+        svg_key = comp.ctype
+        if comp.ctype == "Q":
+            # BJT: use polarity-specific symbol
+            polarity = comp.extra.get("polarity", "NPN")
+            svg_key = f"Q_{polarity}" if polarity in ("NPN", "PNP") else "Q"
+        elif comp.ctype == "M":
+            # MOSFET: use type-specific symbol
+            mos_type = comp.extra.get("mos_type", "NMOS")
+            svg_key = f"M_{mos_type}" if mos_type in ("NMOS", "PMOS") else "M"
+        
+        # Get SVG renderer
+        renderer = self._svg_renderers.get(svg_key)
+        if renderer is None:
+            # Fallback: try base type
+            renderer = self._svg_renderers.get(comp.ctype)
+        
+        if renderer is None:
+            # No SVG available, fall back to basic shape
+            print(f"Warning: No SVG symbol for {comp.ctype}, using fallback drawing")
+            self._draw_component_fallback(comp)
+            return
+        
+        if not comp.pins:
+            return
+        
+        # Get SVG viewBox
+        viewbox = renderer.viewBoxF()
+        if not viewbox.isValid():
+            viewbox = QRectF(0, 0, 64, 64)
+        
+        base_w = viewbox.width()
+        base_h = viewbox.height()
+        
+        # Create SVG item
+        svg_item = QGraphicsSvgItem()
+        svg_item.setSharedRenderer(renderer)
+        svg_item.setElementId("")
+        
+        transform = QTransform()
+        bbox_rect = None
+        
+        # Handle 2-pin components differently: anchor to pins
+        # For 2-pin components (R, C, L, D, V, I), the SVG connection points
+        # are anchored directly to the pin positions, ensuring perfect alignment.
+        # Example: Horizontal resistor with pins at (0, 0) and (40, 0):
+        #   - SVG left connection point → pin1 at (0, 0)
+        #   - SVG right connection point → pin2 at (40, 0)
+        #   - Rotation = 0°, scale = pin_distance / svg_width
+        if len(comp.pins) == 2:
+            pin1 = comp.pins[0]
+            pin2 = comp.pins[1]
+            
+            # SVG anchor points: left and right connection points (mid-left and mid-right of viewBox)
+            anchor1_svg_x = viewbox.left()
+            anchor1_svg_y = viewbox.center().y()
+            anchor2_svg_x = viewbox.right()
+            anchor2_svg_y = viewbox.center().y()
+            
+            # Distance in SVG and scene coordinates
+            length_svg = base_w
+            dx = pin2.x - pin1.x
+            dy = pin2.y - pin1.y
+            length_scene = sqrt(dx*dx + dy*dy)
+            
+            if length_scene == 0:
+                return  # Avoid division by zero
+            
+            # Compute scale to match pin distance exactly
+            scale = length_scene / length_svg if length_svg > 0 else 1.0
+            
+            # Compute rotation angle to align with pin vector
+            # Example: Vertical component with pins at (0, 0) and (0, 40):
+            #   - angle_deg = 90°, symbol rotated 90° to align with pins
+            angle_deg = degrees(atan2(dy, dx))
+            
+            # Build transform:
+            # 1. Translate anchor1_svg to origin (so we can rotate/scale around it)
+            transform.translate(-anchor1_svg_x, -anchor1_svg_y)
+            
+            # 2. Apply flip if needed (before rotation)
+            if comp.extra.get("flipped", False):
+                transform.scale(-1, 1)
+            
+            # 3. Apply rotation (component rotation + angle to align with pins)
+            if comp.rotation != 0:
+                transform.rotate(comp.rotation)
+            transform.rotate(angle_deg)
+            
+            # 4. Apply scaling (so SVG width matches pin distance)
+            transform.scale(scale, scale)
+            
+            # 5. Position at pin1: after transform, origin is at anchor1 position, place it at pin1
+            svg_item.setPos(pin1.x, pin1.y)
+            
+            # Compute bounding box for hit testing: aligned with pin axis
+            # Add padding perpendicular to the pin axis
+            padding = base_h * scale * 0.3  # 30% of symbol height as padding
+            # Perpendicular vector (normalized)
+            perp_x = -dy / length_scene
+            perp_y = dx / length_scene
+            
+            # Bounding box corners in scene coordinates
+            bbox_x1 = pin1.x + perp_x * padding
+            bbox_y1 = pin1.y + perp_y * padding
+            bbox_x2 = pin2.x + perp_x * padding
+            bbox_y2 = pin2.y + perp_y * padding
+            bbox_x3 = pin2.x - perp_x * padding
+            bbox_y3 = pin2.y - perp_y * padding
+            bbox_x4 = pin1.x - perp_x * padding
+            bbox_y4 = pin1.y - perp_y * padding
+            
+            # Create bounding rect from these corners
+            bbox_min_x = min(bbox_x1, bbox_x2, bbox_x3, bbox_x4)
+            bbox_max_x = max(bbox_x1, bbox_x2, bbox_x3, bbox_x4)
+            bbox_min_y = min(bbox_y1, bbox_y2, bbox_y3, bbox_y4)
+            bbox_max_y = max(bbox_y1, bbox_y2, bbox_y3, bbox_y4)
+            bbox_rect = QRectF(bbox_min_x, bbox_min_y, bbox_max_x - bbox_min_x, bbox_max_y - bbox_min_y)
+            
+            center_x = (pin1.x + pin2.x) / 2
+            center_y = (pin1.y + pin2.y) / 2
+            
+        else:
+            # Multi-pin components: center-based layout
+            pin_x_coords = [p.x for p in comp.pins]
+            pin_y_coords = [p.y for p in comp.pins]
+            min_x, max_x = min(pin_x_coords), max(pin_x_coords)
+            min_y, max_y = min(pin_y_coords), max(pin_y_coords)
+            
+            # Component center (snap to grid)
+            center_x = (min_x + max_x) / 2
+            center_y = (min_y + max_y) / 2
+            center_x = round(center_x / self._grid_size) * self._grid_size
+            center_y = round(center_y / self._grid_size) * self._grid_size
+            
+            # Determine symbol size
+            pin_span_x = max_x - min_x
+            pin_span_y = max_y - min_y
+            symbol_size = max(pin_span_x, pin_span_y, 40.0) * 1.2  # 20% larger than pin span
+            
+            # Maintain aspect ratio
+            svg_aspect = base_h / base_w if base_w > 0 else 1.0
+            symbol_width = symbol_size
+            symbol_height = symbol_size * svg_aspect
+            
+            # Scale factors
+            scale_x = symbol_width / base_w
+            scale_y = symbol_height / base_h
+            
+            # ViewBox center
+            viewbox_center = viewbox.center()
+            cx = viewbox_center.x()
+            cy = viewbox_center.y()
+            
+            # Build transform: center-based
+            transform.translate(-cx, -cy)
+            
+            # Apply flip if needed
+            if comp.extra.get("flipped", False):
+                transform.scale(-1, 1)
+            
+            # Apply rotation
+            if comp.rotation != 0:
+                transform.rotate(comp.rotation)
+            
+            # Apply scaling
+            transform.scale(scale_x, scale_y)
+            
+            # Position at center
+            svg_item.setPos(center_x, center_y)
+            
+            # Bounding box
+            half_w = symbol_width / 2
+            half_h = symbol_height / 2
+            bbox_rect = QRectF(center_x - half_w, center_y - half_h, symbol_width, symbol_height)
+        
+        svg_item.setTransform(transform)
+        scene.addItem(svg_item)
+        
+        # Hit testing bounding box
+        bbox_item = QGraphicsRectItem(bbox_rect)
+        bbox_item.setPen(Qt.PenStyle.NoPen)
+        bbox_item.setBrush(Qt.BrushStyle.NoBrush)
+        scene.addItem(bbox_item)
+        
+        self._component_items[bbox_item] = comp.ref
+        self._component_graphics_to_model[bbox_item] = comp
+        self._component_ref_to_graphics[comp.ref] = bbox_item
+        
+        # Draw pins (small circles at pin positions - these stay on grid)
+        for pin in comp.pins:
+            pin_item = QGraphicsEllipseItem(pin.x - 2, pin.y - 2, 4, 4)
+            pin_item.setPen(self._pin_pen)
+            pin_item.setBrush(self._pin_brush)
+            scene.addItem(pin_item)
+            self._pin_marker_items[pin_item] = pin
+        
+        # Draw component label (skip for preview)
+        if comp.ref != "PREVIEW":
+            # Use center for label positioning
+            if len(comp.pins) == 2:
+                label_x = center_x - 10
+                label_y = center_y - 25
+            else:
+                label_x = center_x - 10
+                label_y = center_y - 25
+            label = QGraphicsTextItem(comp.ref)
+            label.setPos(label_x, label_y)
+            scene.addItem(label)
+    
+    def _draw_component_preview_svg(self, comp: SchematicComponent):
+        """
+        Draw a preview version of a component using SVG (semi-transparent).
+        Uses identical geometry to _draw_component_svg but with preview styling.
+        """
+        scene = self.scene()
+        
+        # Determine SVG key based on component type and properties
+        svg_key = comp.ctype
+        if comp.ctype == "Q":
+            polarity = comp.extra.get("polarity", "NPN")
+            svg_key = f"Q_{polarity}" if polarity in ("NPN", "PNP") else "Q"
+        elif comp.ctype == "M":
+            mos_type = comp.extra.get("mos_type", "NMOS")
+            svg_key = f"M_{mos_type}" if mos_type in ("NMOS", "PMOS") else "M"
+        
+        renderer = self._svg_renderers.get(svg_key)
+        if renderer is None:
+            renderer = self._svg_renderers.get(comp.ctype)
+        
+        if renderer is None:
+            return  # No preview if no SVG available
+        
+        if not comp.pins:
+            return
+        
+        # Get SVG viewBox
+        viewbox = renderer.viewBoxF()
+        if not viewbox.isValid():
+            viewbox = QRectF(0, 0, 64, 64)
+        
+        base_w = viewbox.width()
+        base_h = viewbox.height()
+        
+        # Create SVG item with semi-transparent rendering
+        svg_item = QGraphicsSvgItem()
+        svg_item.setSharedRenderer(renderer)
+        svg_item.setOpacity(0.5)  # Semi-transparent for preview
+        svg_item.setElementId("")
+        
+        transform = QTransform()
+        
+        # Handle 2-pin components: anchor to pins (same logic as _draw_component_svg)
+        if len(comp.pins) == 2:
+            pin1 = comp.pins[0]
+            pin2 = comp.pins[1]
+            
+            # SVG anchor points: left and right connection points
+            anchor1_svg_x = viewbox.left()
+            anchor1_svg_y = viewbox.center().y()
+            anchor2_svg_x = viewbox.right()
+            anchor2_svg_y = viewbox.center().y()
+            
+            # Distance in SVG and scene coordinates
+            length_svg = base_w
+            dx = pin2.x - pin1.x
+            dy = pin2.y - pin1.y
+            length_scene = sqrt(dx*dx + dy*dy)
+            
+            if length_scene == 0:
+                return  # Avoid division by zero
+            
+            # Compute scale to match pin distance
+            scale = length_scene / length_svg if length_svg > 0 else 1.0
+            
+            # Compute rotation angle
+            angle_deg = degrees(atan2(dy, dx))
+            
+            # Build transform (same as _draw_component_svg)
+            transform.translate(-anchor1_svg_x, -anchor1_svg_y)
+            
+            if comp.extra.get("flipped", False):
+                transform.scale(-1, 1)
+            
+            if comp.rotation != 0:
+                transform.rotate(comp.rotation)
+            transform.rotate(angle_deg)
+            
+            transform.scale(scale, scale)
+            
+            svg_item.setPos(pin1.x, pin1.y)
+            
+        else:
+            # Multi-pin components: center-based layout (same as _draw_component_svg)
+            pin_x_coords = [p.x for p in comp.pins]
+            pin_y_coords = [p.y for p in comp.pins]
+            min_x, max_x = min(pin_x_coords), max(pin_x_coords)
+            min_y, max_y = min(pin_y_coords), max(pin_y_coords)
+            
+            # Component center (snap to grid)
+            center_x = (min_x + max_x) / 2
+            center_y = (min_y + max_y) / 2
+            center_x = round(center_x / self._grid_size) * self._grid_size
+            center_y = round(center_y / self._grid_size) * self._grid_size
+            
+            # Determine symbol size
+            pin_span_x = max_x - min_x
+            pin_span_y = max_y - min_y
+            symbol_size = max(pin_span_x, pin_span_y, 40.0) * 1.2
+            
+            # Maintain aspect ratio
+            svg_aspect = base_h / base_w if base_w > 0 else 1.0
+            symbol_width = symbol_size
+            symbol_height = symbol_size * svg_aspect
+            
+            # Scale factors
+            scale_x = symbol_width / base_w
+            scale_y = symbol_height / base_h
+            
+            # ViewBox center
+            viewbox_center = viewbox.center()
+            cx = viewbox_center.x()
+            cy = viewbox_center.y()
+            
+            # Build transform: center-based
+            transform.translate(-cx, -cy)
+            
+            if comp.extra.get("flipped", False):
+                transform.scale(-1, 1)
+            
+            if comp.rotation != 0:
+                transform.rotate(comp.rotation)
+            
+            transform.scale(scale_x, scale_y)
+            
+            svg_item.setPos(center_x, center_y)
+        
+        svg_item.setTransform(transform)
+        scene.addItem(svg_item)
+        self._preview_component_items.append(svg_item)
+        
+        # Draw preview pins (semi-transparent, at grid-snapped positions)
+        for pin in comp.pins:
+            pin_item = QGraphicsEllipseItem(pin.x - 2, pin.y - 2, 4, 4)
+            pin_item.setPen(self._preview_pen)
+            pin_item.setBrush(QBrush(Qt.GlobalColor.gray))
+            pin_item.setOpacity(0.5)
+            scene.addItem(pin_item)
+            self._preview_component_items.append(pin_item)
+    
+    def _draw_component_fallback(self, comp: SchematicComponent):
+        """Fallback drawing method when SVG is not available."""
+        # Use existing drawing methods as fallback
         if comp.ctype == "R":
             self._draw_resistor(comp)
         elif comp.ctype == "C":
@@ -470,12 +887,29 @@ class SchematicView(QGraphicsView):
 
     def _generate_component_ref(self, component_type: str) -> str:
         """Generate a unique component reference."""
+        # Handle aliases for component types
+        type_normalized = component_type
+        if component_type in ("BJT", "Q"):
+            type_normalized = "Q"
+        elif component_type in ("MOSFET", "M"):
+            type_normalized = "M"
+        elif component_type in ("VCCS", "G"):
+            type_normalized = "G"
+        
         prefix_map = {
-            "R": "R", "C": "C", "OPAMP": "U", "V": "V", "I": "I", "GND": "GND", "VOUT": "VOUT",
+            "R": "R", "C": "C", "L": "L", "D": "D",
+            "Q": "Q", "M": "M", "G": "G",
+            "OPAMP": "U", "V": "V", "I": "I",
+            "GND": "GND", "VOUT": "VOUT",
         }
-        prefix = prefix_map.get(component_type, "X")
-        self._component_ref_counters[component_type] += 1
-        num = self._component_ref_counters[component_type]
+        prefix = prefix_map.get(type_normalized, "X")
+        
+        # Ensure counter exists for this type
+        if type_normalized not in self._component_ref_counters:
+            self._component_ref_counters[type_normalized] = 0
+        
+        self._component_ref_counters[type_normalized] += 1
+        num = self._component_ref_counters[type_normalized]
         return f"{prefix}{num}"
 
     def _create_resistor(self, ref: str, x: float, y: float) -> SchematicComponent:
@@ -610,6 +1044,129 @@ class SchematicView(QGraphicsView):
             ],
         )
         return comp
+    
+    def _create_inductor(self, ref: str, x: float, y: float) -> SchematicComponent:
+        """Create an inductor component at position (x, y)."""
+        pin_spacing = 50.0
+        pin1_x, pin1_y = self._snap_to_grid(x - pin_spacing/2, y)
+        pin2_x, pin2_y = self._snap_to_grid(x + pin_spacing/2, y)
+        
+        comp = SchematicComponent(
+            ref=ref,
+            ctype="L",
+            x=x,
+            y=y,
+            rotation=0,
+            value=1e-3,  # 1 mH default
+            pins=[
+                SchematicPin(name="1", x=pin1_x, y=pin1_y, net=None),
+                SchematicPin(name="2", x=pin2_x, y=pin2_y, net=None),
+            ],
+        )
+        return comp
+    
+    def _create_diode(self, ref: str, x: float, y: float) -> SchematicComponent:
+        """Create a diode component at position (x, y)."""
+        pin_spacing = 40.0
+        pin1_x, pin1_y = self._snap_to_grid(x - pin_spacing/2, y)
+        pin2_x, pin2_y = self._snap_to_grid(x + pin_spacing/2, y)
+        
+        comp = SchematicComponent(
+            ref=ref,
+            ctype="D",
+            x=x,
+            y=y,
+            rotation=0,
+            value=0.0,
+            pins=[
+                SchematicPin(name="A", x=pin1_x, y=pin1_y, net=None),  # Anode
+                SchematicPin(name="K", x=pin2_x, y=pin2_y, net=None),  # Cathode
+            ],
+            extra={},  # Model name will be added via properties dialog
+        )
+        return comp
+    
+    def _create_bjt(self, ref: str, x: float, y: float) -> SchematicComponent:
+        """Create a BJT transistor component at position (x, y)."""
+        pin_spacing = 30.0
+        # Standard BJT pin layout: C (top), B (left), E (bottom)
+        collector_x, collector_y = self._snap_to_grid(x, y - pin_spacing)
+        base_x, base_y = self._snap_to_grid(x - pin_spacing, y)
+        emitter_x, emitter_y = self._snap_to_grid(x, y + pin_spacing)
+        
+        comp = SchematicComponent(
+            ref=ref,
+            ctype="Q",
+            x=x,
+            y=y,
+            rotation=0,
+            value=1.0,  # unused for BJTs
+            pins=[
+                SchematicPin(name="C", x=collector_x, y=collector_y, net=None),  # Collector
+                SchematicPin(name="B", x=base_x, y=base_y, net=None),  # Base
+                SchematicPin(name="E", x=emitter_x, y=emitter_y, net=None),  # Emitter
+            ],
+            extra={
+                "polarity": "NPN",  # Default to NPN
+            },
+        )
+        return comp
+    
+    def _create_mosfet(self, ref: str, x: float, y: float) -> SchematicComponent:
+        """Create a MOSFET component at position (x, y)."""
+        pin_spacing = 30.0
+        # Standard MOSFET pin layout: D (top), G (left), S (bottom), B (right, if 4-terminal)
+        drain_x, drain_y = self._snap_to_grid(x, y - pin_spacing)
+        gate_x, gate_y = self._snap_to_grid(x - pin_spacing, y)
+        source_x, source_y = self._snap_to_grid(x, y + pin_spacing)
+        bulk_x, bulk_y = self._snap_to_grid(x + pin_spacing, y)
+        
+        comp = SchematicComponent(
+            ref=ref,
+            ctype="M",
+            x=x,
+            y=y,
+            rotation=0,
+            value=1.0,  # unused for MOSFETs
+            pins=[
+                SchematicPin(name="D", x=drain_x, y=drain_y, net=None),  # Drain
+                SchematicPin(name="G", x=gate_x, y=gate_y, net=None),  # Gate
+                SchematicPin(name="S", x=source_x, y=source_y, net=None),  # Source
+                SchematicPin(name="B", x=bulk_x, y=bulk_y, net=None),  # Bulk/Substrate
+            ],
+            extra={
+                "mos_type": "NMOS",  # Default to NMOS
+            },
+        )
+        return comp
+    
+    def _create_vccs(self, ref: str, x: float, y: float) -> SchematicComponent:
+        """Create a voltage-controlled current source (VCCS) component at position (x, y)."""
+        pin_spacing = 25.0
+        # VCCS layout: 4 pins arranged in a square
+        # Output current pins (IP, IN) - vertical
+        ip_x, ip_y = self._snap_to_grid(x, y - pin_spacing)
+        in_x, in_y = self._snap_to_grid(x, y + pin_spacing)
+        # Control voltage pins (VP, VN) - horizontal
+        vp_x, vp_y = self._snap_to_grid(x + pin_spacing, y)
+        vn_x, vn_y = self._snap_to_grid(x - pin_spacing, y)
+        
+        comp = SchematicComponent(
+            ref=ref,
+            ctype="G",
+            x=x,
+            y=y,
+            rotation=0,
+            value=1e-3,  # 1 mS default transconductance
+            pins=[
+                SchematicPin(name="IP", x=ip_x, y=ip_y, net=None),  # Output current positive
+                SchematicPin(name="IN", x=in_x, y=in_y, net=None),  # Output current negative
+                SchematicPin(name="VP", x=vp_x, y=vp_y, net=None),  # Control voltage positive
+                SchematicPin(name="VN", x=vn_x, y=vn_y, net=None),  # Control voltage negative
+            ],
+            extra={},
+        )
+        return comp
 
     def _place_component_at(self, x: float, y: float, component_type: str):
         """Place a component at the given position."""
@@ -622,6 +1179,16 @@ class SchematicView(QGraphicsView):
             comp = self._create_resistor(ref, x, y)
         elif component_type == "C":
             comp = self._create_capacitor(ref, x, y)
+        elif component_type == "L":
+            comp = self._create_inductor(ref, x, y)
+        elif component_type == "D":
+            comp = self._create_diode(ref, x, y)
+        elif component_type == "Q" or component_type == "BJT":
+            comp = self._create_bjt(ref, x, y)
+        elif component_type == "M" or component_type == "MOSFET":
+            comp = self._create_mosfet(ref, x, y)
+        elif component_type == "G" or component_type == "VCCS":
+            comp = self._create_vccs(ref, x, y)
         elif component_type == "OPAMP":
             comp = self._create_opamp(ref, x, y)
         elif component_type == "V":
@@ -1216,20 +1783,37 @@ class SchematicView(QGraphicsView):
 
         snapped_x, snapped_y = self._snap_to_grid(x, y)
         
+        # Use unified preview drawing that creates temporary component and draws it with SVG
+        # Create temporary component for preview
         if self._placement_type == "R":
-            self._draw_preview_resistor(snapped_x, snapped_y)
+            preview_comp = self._create_resistor("PREVIEW", snapped_x, snapped_y)
         elif self._placement_type == "C":
-            self._draw_preview_capacitor(snapped_x, snapped_y)
+            preview_comp = self._create_capacitor("PREVIEW", snapped_x, snapped_y)
+        elif self._placement_type == "L":
+            preview_comp = self._create_inductor("PREVIEW", snapped_x, snapped_y)
+        elif self._placement_type == "D":
+            preview_comp = self._create_diode("PREVIEW", snapped_x, snapped_y)
+        elif self._placement_type == "Q" or self._placement_type == "BJT":
+            preview_comp = self._create_bjt("PREVIEW", snapped_x, snapped_y)
+        elif self._placement_type == "M" or self._placement_type == "MOSFET":
+            preview_comp = self._create_mosfet("PREVIEW", snapped_x, snapped_y)
+        elif self._placement_type == "G" or self._placement_type == "VCCS":
+            preview_comp = self._create_vccs("PREVIEW", snapped_x, snapped_y)
         elif self._placement_type == "OPAMP":
-            self._draw_preview_opamp(snapped_x, snapped_y)
+            preview_comp = self._create_opamp("PREVIEW", snapped_x, snapped_y)
         elif self._placement_type == "V":
-            self._draw_preview_voltage_source(snapped_x, snapped_y)
+            preview_comp = self._create_voltage_source("PREVIEW", snapped_x, snapped_y)
         elif self._placement_type == "I":
-            self._draw_preview_current_source(snapped_x, snapped_y)
+            preview_comp = self._create_current_source("PREVIEW", snapped_x, snapped_y)
         elif self._placement_type == "GND":
-            self._draw_preview_ground(snapped_x, snapped_y)
+            preview_comp = self._create_ground("PREVIEW", snapped_x, snapped_y)
         elif self._placement_type == "VOUT":
-            self._draw_preview_vout(snapped_x, snapped_y)
+            preview_comp = self._create_vout("PREVIEW", snapped_x, snapped_y)
+        else:
+            return
+        
+        # Draw preview with SVG (semi-transparent)
+        self._draw_component_preview_svg(preview_comp)
 
     def _draw_preview_resistor(self, x: float, y: float):
         """Draw preview resistor."""
