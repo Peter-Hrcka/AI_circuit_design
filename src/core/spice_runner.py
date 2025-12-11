@@ -171,14 +171,83 @@ def run_spice_ac_sweep(netlist: str) -> Dict[str, list]:
             raise SpiceError("SPICE log missing.")
 
         log_text = log_path.read_text(encoding="utf-8", errors="ignore")
+        stdout_text = result.stdout if result.stdout else ""
+        
+        # When using -o flag, ngspice writes .print output to the log file, not stdout
+        # So prefer log file for parsing, but check both if needed
+        # Look for data patterns in both, but prioritize log file
+        text_to_parse = log_text
+        if not log_text.strip() or "Index" not in log_text and "frequency" not in log_text:
+            # If log doesn't seem to have data, try stdout
+            if stdout_text.strip():
+                text_to_parse = stdout_text
 
         freq = []
         vout = []
         vin = []
 
-        for line in log_text.splitlines():
+        # Try to parse data lines - ngspice .print output can have various formats
+        # Common formats:
+        # 1. Indexed format: "0    1.000E+03    1.000E+02    1.000E+00"
+        # 2. Table format with headers like "Index frequency vm(n002) vm(n001)"
+        # 3. Space or tab separated values
+        
+        # Use regex to match lines with scientific notation or decimal numbers
+        # Pattern: optional index, frequency, vout, optional vin
+        data_line_pattern = re.compile(
+            r'^\s*'  # leading whitespace
+            r'(?:[0-9]+\s+)?'  # optional index
+            r'([0-9.eE+\-]+)'  # frequency (required)
+            r'\s+'  # whitespace separator
+            r'([0-9.eE+\-]+)'  # vout (required)
+            r'(?:\s+([0-9.eE+\-]+))?'  # optional vin
+            r'.*$'  # rest of line
+        )
+        
+        # Track if we've seen the data table header to skip it
+        seen_data_header = False
+        
+        for line in text_to_parse.splitlines():
+            line_stripped = line.strip()
+            if not line_stripped:
+                continue
+            
+            # Skip header lines more carefully - only skip if it's clearly a header row
+            # Check for header patterns like "Index frequency vm(...)" but allow data rows
+            line_lower = line_stripped.lower()
+            if (line_lower.startswith('index') or 
+                (line_lower.startswith('----') and '----' in line) or
+                ('index' in line_lower and 'frequency' in line_lower and 'vm(' in line_lower)):
+                seen_data_header = True
+                continue
+            
+            # Skip other obvious non-data lines
+            if any(keyword in line_lower for keyword in 
+                   ['ac analysis', 'circuit:', 'doing analysis', 'using', 'no. of data rows',
+                    'total analysis', 'total elapsed', 'warning:', 'note:', 'error:',
+                    'ngspice', 'copyright', 'compiled', 'creation date', 'batch mode']):
+                continue
+            
+            # Try regex match first (more flexible)
+            match = data_line_pattern.match(line)
+            if match:
+                try:
+                    f_str, vo_str, vi_str = match.groups()
+                    f = float(f_str)
+                    vo = float(vo_str)
+                    vi = float(vi_str) if vi_str else 1.0
+                    
+                    # Validate reasonable frequency range (1e-3 to 1e15 Hz)
+                    if 1e-3 <= f <= 1e15:
+                        freq.append(f)
+                        vout.append(vo)
+                        vin.append(vi)
+                    continue
+                except (ValueError, TypeError):
+                    pass
+            
+            # Fallback: try splitting by whitespace and parsing all as floats
             parts = line.split()
-            # Require at least index + freq + vout
             if len(parts) < 3:
                 continue
             try:
@@ -197,12 +266,30 @@ def run_spice_ac_sweep(netlist: str) -> Dict[str, list]:
                 # shouldn't happen, but be safe
                 continue
 
-            freq.append(f)
-            vout.append(vo)
-            vin.append(vi)
+            # Validate reasonable frequency range (1e-3 to 1e15 Hz)
+            if 1e-3 <= f <= 1e15:
+                freq.append(f)
+                vout.append(vo)
+                vin.append(vi)
 
         if len(freq) == 0:
-            raise SpiceError("Could not parse AC sweep results.")
+            # Provide more helpful error message with log excerpt
+            parsed_preview = "\n".join(text_to_parse.splitlines()[:50])  # First 50 lines
+            if len(text_to_parse.splitlines()) > 50:
+                parsed_preview += f"\n... (truncated, total {len(text_to_parse.splitlines())} lines)"
+            
+            log_preview = "\n".join(log_text.splitlines()[:20]) if log_text.strip() else "(empty)"
+            stdout_preview = "\n".join(stdout_text.splitlines()[:20]) if stdout_text.strip() else "(empty)"
+            
+            raise SpiceError(
+                "Could not parse AC sweep results.\n\n"
+                "Expected format: lines with frequency and voltage magnitude values.\n"
+                "The output may be empty, contain errors, or use an unexpected format.\n\n"
+                f"=== PARSED TEXT (log or stdout) PREVIEW ===\n{parsed_preview}\n\n"
+                f"=== LOG FILE PREVIEW ===\n{log_preview}\n\n"
+                f"=== STDOUT PREVIEW ===\n{stdout_preview}\n\n"
+                f"=== STDERR ===\n{result.stderr if result.stderr else '(empty)'}"
+            )
 
         gain_db = [20.0 * math.log10(abs(vo) if vo != 0 else 1e-30) for vo in vout]
 

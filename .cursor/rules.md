@@ -222,6 +222,31 @@ Cursor must:
 
 ---
 
+### 2.4 Schematic Symbols (SVG, used in canvas)
+
+The schematic editor must use vector symbols loaded from SVG files for drawing components on the canvas (not the toolbar icons).
+
+- All schematic symbols must be loaded from `src/resources/symbols/`.
+- One SVG per symbol, e.g.:
+  - `resistor.svg`
+  - `capacitor.svg`
+  - `inductor.svg`
+  - `diode.svg`
+  - `bjt.svg`
+  - `mosfet.svg`
+  - `voltage_source.svg`
+  - `current_source.svg`
+  - `opamp.svg`
+  - `ground.svg`
+  - `net_label.svg`
+  - `vccs.svg`
+- These SVGs are used only for the **schematic canvas rendering** (the QGraphicsView), not for the toolbar buttons.
+- Existing procedural / placeholder drawing code for R, C, V, I, etc. should be gradually replaced by SVG-based rendering that:
+  - keeps pin locations and connectivity consistent,
+  - supports rotation and mirroring,
+  - and uses `SchematicComponent.ctype` to select the correct symbol.
+
+
 ## 3. SCHEMATIC EDITOR RULES (PySide6)
 
 The schematic editor is LTspice-like:

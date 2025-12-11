@@ -469,6 +469,7 @@ def build_ac_sweep_netlist(
     input_node: str = "Vin",
     output_node: str = "Vout",
     vsource_ref: str | None = None,
+    sweep_type: str = "dec",
 ) -> str:
     """
     Build a general AC sweep netlist for any circuit topology.
@@ -481,9 +482,21 @@ def build_ac_sweep_netlist(
         input_node: Node name for input (will add AC source if not present)
         output_node: Node name for output (for measurement)
         vsource_ref: Optional reference of voltage source to use as AC input
+        sweep_type: Sweep type - "dec" for logarithmic (per decade) or "lin" for linear
     """
     lines = [f"* AC sweep for bandwidth - {circuit.name}"]
     lines.append("")
+
+    # Use output node from circuit metadata if available, otherwise use parameter default
+    if "output_node" in circuit.metadata:
+        output_node = circuit.metadata["output_node"]
+    
+    # If still not found, try to find it from opamp components
+    if output_node == "Vout":  # Still using default
+        for comp in circuit.components:
+            if comp.ctype == "OPAMP" and "output_node" in comp.extra:
+                output_node = comp.extra["output_node"]
+                break
 
     # Select which voltage source will be used as AC input
     selected_v = None
@@ -578,8 +591,13 @@ def build_ac_sweep_netlist(
     if has_default_mos_pmos:
         lines.append(".model PMOS_DEFAULT PMOS (LEVEL=1 VTO=-1 KP=5e-4)")
 
+    # Determine sweep mode
+    mode = (sweep_type or "dec").lower()
+    if mode not in ("dec", "lin"):
+        mode = "dec"
+
     lines.append("")
-    lines.append(f".ac dec {points} {f_start} {f_stop}")
+    lines.append(f".ac {mode} {points} {f_start} {f_stop}")
     lines.append(f".print ac vm({output_node}) vm({vsource_node})")
     lines.append(".end")
 

@@ -6,6 +6,7 @@ from PySide6.QtGui import QPen, QPainter, QBrush, QColor, QPolygonF, QTransform,
 from PySide6.QtCore import Qt, QRectF, QPointF, Signal
 from PySide6.QtSvg import QSvgRenderer
 from pathlib import Path
+import math
 
 from core.schematic_model import (
     SchematicModel,
@@ -251,10 +252,59 @@ class SchematicView(QGraphicsView):
         """Rotate a component by 90 degrees. Returns True if successful."""
         for comp in self.model.components:
             if comp.ref == ref:
+                # Calculate component center from pins
+                if not comp.pins:
+                    return False
+                
+                pin_x_coords = [p.x for p in comp.pins]
+                pin_y_coords = [p.y for p in comp.pins]
+                center_x = (min(pin_x_coords) + max(pin_x_coords)) / 2
+                center_y = (min(pin_y_coords) + max(pin_y_coords)) / 2
+                
+                # Store old pin positions before rotation (for wire updates)
+                old_pin_positions = [(pin.x, pin.y) for pin in comp.pins]
+                
+                # Rotate each pin position around the component center by 90 degrees
+                new_pin_positions = []
+                for pin in comp.pins:
+                    rotated_x, rotated_y = self._rotate_pin_position(
+                        pin.x, pin.y, center_x, center_y, 90.0
+                    )
+                    pin.x = rotated_x
+                    pin.y = rotated_y
+                    new_pin_positions.append((rotated_x, rotated_y))
+                
+                # Update the rotation angle
                 comp.rotation = (comp.rotation + 90) % 360
+                
+                # Update wires connected to this component's pins
+                # Wires store absolute coordinates, so they need to be updated too
+                self._update_wires_for_rotated_component(old_pin_positions, new_pin_positions)
+                
                 self._redraw_from_model()
                 return True
         return False
+    
+    def _update_wires_for_rotated_component(self, old_pin_positions: list, new_pin_positions: list):
+        """Update wire endpoints that are connected to this component's pins after rotation."""
+        if not self.model or not self.model.wires:
+            return
+        
+        # Create a mapping from old to new positions
+        pin_position_map = dict(zip(old_pin_positions, new_pin_positions))
+        
+        # Update wire endpoints that match any of the old pin positions
+        tolerance = 0.1  # Small tolerance for floating point comparison
+        for wire in self.model.wires:
+            for old_pos, new_pos in pin_position_map.items():
+                old_x, old_y = old_pos
+                new_x, new_y = new_pos
+                # Check if wire start point matches this old pin position
+                if abs(wire.x1 - old_x) < tolerance and abs(wire.y1 - old_y) < tolerance:
+                    wire.x1, wire.y1 = new_x, new_y
+                # Check if wire end point matches this old pin position
+                if abs(wire.x2 - old_x) < tolerance and abs(wire.y2 - old_y) < tolerance:
+                    wire.x2, wire.y2 = new_x, new_y
 
     def set_component_values(self, rin=None, r1=None, r2=None):
         """Legacy method for setting component values (for backward compatibility)."""
@@ -351,18 +401,146 @@ class SchematicView(QGraphicsView):
                 # Draw selection rectangle around component
                 comp = self._get_component_by_ref(ref)
                 if comp:
-                    bbox = self._get_component_bounding_box(comp)
-                    if bbox:
-                        min_x, min_y, max_x, max_y = bbox
-                        rect_item = QGraphicsRectItem(min_x - 3, min_y - 3, max_x - min_x + 6, max_y - min_y + 6)
-                        rect_item.setPen(self._selection_pen)
-                        rect_item.setZValue(1000)  # Above everything
-                        scene.addItem(rect_item)
+                    self._draw_selection_rectangle(comp, scene)
 
     def _draw_component(self, comp: SchematicComponent):
         """Draw a single component using SVG symbols."""
         # Use SVG-based rendering for all components
         self._draw_component_svg(comp)
+    
+    def _draw_selection_rectangle(self, comp: SchematicComponent, scene: QGraphicsScene):
+        """Draw a rotated selection rectangle around a component."""
+        if not comp.pins:
+            return
+        
+        # Get component center from pins
+        pin_x_coords = [p.x for p in comp.pins]
+        pin_y_coords = [p.y for p in comp.pins]
+        center_x = (min(pin_x_coords) + max(pin_x_coords)) / 2
+        center_y = (min(pin_y_coords) + max(pin_y_coords)) / 2
+        
+        # Get SVG renderer to determine aspect ratio (same logic as _draw_component_svg)
+        svg_key = comp.ctype
+        if comp.ctype == "Q":
+            polarity = comp.extra.get("polarity", "NPN")
+            svg_key = f"Q_{polarity}" if polarity in ("NPN", "PNP") else "Q"
+        elif comp.ctype == "M":
+            mos_type = comp.extra.get("mos_type", "NMOS")
+            svg_key = f"M_{mos_type}" if mos_type in ("NMOS", "PMOS") else "M"
+        
+        renderer = self._svg_renderers.get(svg_key) or self._svg_renderers.get(comp.ctype)
+        if renderer:
+            viewbox = renderer.viewBoxF()
+            if viewbox.isValid():
+                svg_aspect = viewbox.height() / viewbox.width() if viewbox.width() > 0 else 1.0
+            else:
+                svg_aspect = 1.0
+        else:
+            svg_aspect = 1.0
+        
+        # Calculate symbol dimensions using the same logic as _draw_component_svg
+        # The key is to get the pin distance (which is rotation-invariant) and use that
+        # to determine the base symbol dimensions
+        if len(comp.pins) >= 2:
+            # Get pin distance (this is the same regardless of rotation)
+            pin1 = comp.pins[0]
+            pin2 = comp.pins[1]
+            dx = pin2.x - pin1.x
+            dy = pin2.y - pin1.y
+            pin_distance = (dx**2 + dy**2)**0.5
+            
+            # Calculate bounding box of pins (for determining orientation)
+            pin_min_x = min(p.x for p in comp.pins)
+            pin_max_x = max(p.x for p in comp.pins)
+            pin_min_y = min(p.y for p in comp.pins)
+            pin_max_y = max(p.y for p in comp.pins)
+            
+            pin_width = pin_max_x - pin_min_x
+            pin_height = pin_max_y - pin_min_y
+            
+            if comp.ctype in ("R", "C", "L", "D"):
+                # Horizontal components: base width is pin distance, height from aspect
+                # These components are wider than tall in unrotated state
+                base_width = pin_distance
+                base_height = base_width * svg_aspect
+            elif comp.ctype in ("V", "I"):
+                # Vertical components: base height is pin distance, width from aspect
+                # These components are taller than wide in unrotated state
+                base_height = pin_distance
+                base_width = base_height / svg_aspect if svg_aspect > 0 else base_height
+            elif comp.ctype in ("Q", "M", "G"):
+                # Square components: use max span
+                max_span = max(pin_width, pin_height)
+                base_width = max_span
+                base_height = max_span
+            elif comp.ctype == "OPAMP":
+                # Op-amp: width from pin span
+                base_width = pin_width
+                base_height = base_width * svg_aspect
+            else:
+                # Default: use pin distance
+                base_width = max(pin_distance, 64.0)
+                base_height = base_width * svg_aspect
+        else:
+            # Single pin or default
+            base_width = 50.0
+            base_height = base_width * svg_aspect
+        
+        # The selection box should always use the base (unrotated) dimensions
+        # regardless of rotation - rotation only changes orientation, not size
+        symbol_width = base_width
+        symbol_height = base_height
+        
+        # Add padding
+        padding = 3.0
+        rect_width = base_width + 2 * padding
+        rect_height = base_height + 2 * padding
+        
+        # Create rectangle centered at origin (0, 0) in local coordinates
+        rect_item = QGraphicsRectItem(-rect_width/2, -rect_height/2, rect_width, rect_height)
+        rect_item.setPen(self._selection_pen)
+        rect_item.setZValue(1000)  # Above everything
+        
+        # Set the transform origin to the center of the rectangle (0, 0 in local coordinates)
+        rect_item.setTransformOriginPoint(0, 0)
+        
+        # Position rectangle at component center
+        rect_item.setPos(center_x, center_y)
+        
+        # Apply rotation transform if component is rotated
+        if comp.rotation != 0:
+            rect_item.setRotation(comp.rotation)
+        
+        scene.addItem(rect_item)
+    
+    def _rotate_pin_position(self, pin_x: float, pin_y: float, center_x: float, center_y: float, rotation_deg: float) -> tuple[float, float]:
+        """
+        Rotate a pin position around a center point.
+        
+        Args:
+            pin_x, pin_y: Pin position
+            center_x, center_y: Rotation center
+            rotation_deg: Rotation angle in degrees
+            
+        Returns:
+            (rotated_x, rotated_y): Rotated pin position
+        """
+        if rotation_deg == 0:
+            return (pin_x, pin_y)
+        
+        rotation_rad = math.radians(rotation_deg)
+        cos_theta = math.cos(rotation_rad)
+        sin_theta = math.sin(rotation_rad)
+        
+        # Calculate relative position
+        pin_rel_x = pin_x - center_x
+        pin_rel_y = pin_y - center_y
+        
+        # Apply rotation
+        rotated_x = center_x + pin_rel_x * cos_theta - pin_rel_y * sin_theta
+        rotated_y = center_y + pin_rel_x * sin_theta + pin_rel_y * cos_theta
+        
+        return (rotated_x, rotated_y)
     
     def _draw_component_svg(self, comp: SchematicComponent):
         """
@@ -450,13 +628,25 @@ class SchematicView(QGraphicsView):
             
             if comp.ctype in ("R", "C", "L", "D"):
                 # Horizontal 2-pin components: SVG pins at (0,32) and (64,32) - 64 pixels apart
-                # Symbol width should match pin distance exactly to align pins
-                symbol_width = pin_width  # Use exact pin span
+                # Use pin distance (rotation-invariant) to determine symbol width
+                # For horizontal components, width is the pin distance, height is from aspect ratio
+                pin1 = comp.pins[0]
+                pin2 = comp.pins[1]
+                dx = pin2.x - pin1.x
+                dy = pin2.y - pin1.y
+                pin_distance = (dx**2 + dy**2)**0.5
+                symbol_width = pin_distance  # Use pin distance, not pin_width (which changes with rotation)
                 symbol_height = symbol_width * svg_aspect
             elif comp.ctype in ("V", "I"):
                 # Vertical 2-pin components: SVG pins at (32,0) and (32,64) - 64 pixels apart
-                # Symbol height should match pin distance exactly to align pins
-                symbol_height = pin_height  # Use exact pin span
+                # Use pin distance (rotation-invariant) to determine symbol height
+                # For vertical components, height is the pin distance, width is from aspect ratio
+                pin1 = comp.pins[0]
+                pin2 = comp.pins[1]
+                dx = pin2.x - pin1.x
+                dy = pin2.y - pin1.y
+                pin_distance = (dx**2 + dy**2)**0.5
+                symbol_height = pin_distance  # Use pin distance, not pin_height (which changes with rotation)
                 symbol_width = symbol_height / svg_aspect if svg_aspect > 0 else symbol_height
             elif comp.ctype in ("Q", "M"):
                 # 3-4 pin components: SVG pins at (0,32), (32,0), (32,64), (64,32)
@@ -474,8 +664,10 @@ class SchematicView(QGraphicsView):
                 symbol_height = symbol_size
             elif comp.ctype == "OPAMP":
                 # Op-amp: In+ at (0,24), In- at (0,40), Out at (64,32)
-                # Pins span 64 pixels horizontally
-                symbol_width = pin_width  # Use exact pin span
+                # Pins span 64 pixels horizontally in unrotated state
+                # Use pin_width for op-amps since they have 3 pins and the span is meaningful
+                # But we need to handle rotation - for op-amps, use the larger dimension
+                symbol_width = max(pin_width, pin_height)  # Use max to handle rotation
                 symbol_height = symbol_width * svg_aspect
             else:
                 # Default: use pin distance
@@ -512,20 +704,25 @@ class SchematicView(QGraphicsView):
         
         # Build transform matching preview logic
         if comp.rotation != 0 or comp.extra.get("flipped", False):
-            # Complex transform: translate to center, rotate/flip, translate back, scale
+            # Complex transform: translate to symbol center (in local coordinates), rotate/flip, translate back, scale
+            # Symbol center in local coordinates is always (symbol_width/2, symbol_height/2)
             transform = QTransform()
-            transform.translate(center_x, center_y)
+            symbol_center_x_local = symbol_width / 2.0
+            symbol_center_y_local = symbol_height / 2.0
+            
+            # Translate to symbol center (in local coordinates)
+            transform.translate(symbol_center_x_local, symbol_center_y_local)
             
             # Apply flip if needed (horizontal flip)
             if comp.extra.get("flipped", False):
                 transform.scale(-1, 1)
             
-            # Apply rotation
+            # Apply rotation around symbol center
             if comp.rotation != 0:
                 transform.rotate(comp.rotation)
             
-            # Translate back to original position
-            transform.translate(-center_x, -center_y)
+            # Translate back from symbol center
+            transform.translate(-symbol_center_x_local, -symbol_center_y_local)
             
             # Scale to desired size
             transform.scale(scale_x, scale_y)
@@ -550,6 +747,8 @@ class SchematicView(QGraphicsView):
         self._component_ref_to_graphics[comp.ref] = bbox_item
         
         # Draw pins (small circles at pin positions)
+        # Pin positions in the model are already at their final positions (including rotation)
+        # So we draw them directly without applying rotation again
         for pin in comp.pins:
             pin_item = QGraphicsEllipseItem(pin.x - 2, pin.y - 2, 4, 4)
             pin_item.setPen(self._pin_pen)
@@ -636,22 +835,29 @@ class SchematicView(QGraphicsView):
             svg_item.setPos(center_x - symbol_width / 2 + 16, center_y - symbol_height / 2)
         else:
             svg_item.setPos(center_x - symbol_width / 2, center_y - symbol_height / 2)
-        svg_item.setTransform(QTransform().scale(symbol_width / 64.0, symbol_height / 64.0))
+        scale_x = symbol_width / 64.0
+        scale_y = symbol_height / 64.0
         
-        # Apply rotation
+        # Apply rotation around symbol center (in local coordinates)
         if comp.rotation != 0:
+            symbol_center_x_local = symbol_width / 2.0
+            symbol_center_y_local = symbol_height / 2.0
             svg_item.setTransform(QTransform()
-                                  .translate(center_x, center_y)
+                                  .translate(symbol_center_x_local, symbol_center_y_local)
                                   .rotate(comp.rotation)
-                                  .translate(-center_x, -center_y)
-                                  .scale(symbol_width / 64.0, symbol_height / 64.0))
+                                  .translate(-symbol_center_x_local, -symbol_center_y_local)
+                                  .scale(scale_x, scale_y))
+        else:
+            svg_item.setTransform(QTransform().scale(scale_x, scale_y))
         
         scene.addItem(svg_item)
         self._preview_component_items.append(svg_item)
         
         # Draw preview pins (semi-transparent)
+        # Rotate pin positions around component center if component is rotated
         for pin in comp.pins:
-            pin_item = QGraphicsEllipseItem(pin.x - 2, pin.y - 2, 4, 4)
+            rotated_x, rotated_y = self._rotate_pin_position(pin.x, pin.y, center_x, center_y, comp.rotation)
+            pin_item = QGraphicsEllipseItem(rotated_x - 2, rotated_y - 2, 4, 4)
             pin_item.setPen(self._preview_pen)
             pin_item.setBrush(QBrush(Qt.GlobalColor.gray))
             pin_item.setOpacity(0.5)

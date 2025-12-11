@@ -30,10 +30,30 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QComboBox,
     QDoubleSpinBox,
+    QSpinBox,
     QFormLayout,
 )
 from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QShortcut, QKeySequence, QAction, QIcon
+
+# Optional matplotlib imports for plotting
+try:
+    from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+    from matplotlib.figure import Figure
+    HAS_MATPLOTLIB = True
+except ImportError:
+    HAS_MATPLOTLIB = False
+    # Create dummy classes to prevent errors
+    class FigureCanvas:
+        def __init__(self, *args, **kwargs):
+            pass
+    class Figure:
+        def __init__(self, *args, **kwargs):
+            pass
+        def clear(self):
+            pass
+        def add_subplot(self, *args, **kwargs):
+            return None
 
 from app.schematic_view import SchematicView
 from app.component_properties_dialog import ComponentPropertiesDialog
@@ -717,12 +737,29 @@ class MainWindow(QMainWindow):
         analysis_type_combo.addItems(["DC", "AC", "Transient", "Noise", "FFT/THD"])
         form.addRow("Analysis Type:", analysis_type_combo)
         
-        # Frequency (for AC, FFT)
-        self.freq_edit = QDoubleSpinBox()
-        self.freq_edit.setRange(1.0, 1e12)
-        self.freq_edit.setValue(1000000.0)  # 1 MHz default
-        self.freq_edit.setSuffix(" Hz")
-        form.addRow("Frequency:", self.freq_edit)
+        # AC sweep controls
+        self.ac_start_freq_edit = QDoubleSpinBox()
+        self.ac_start_freq_edit.setRange(1.0, 1e12)
+        self.ac_start_freq_edit.setValue(10.0)
+        self.ac_start_freq_edit.setSuffix(" Hz")
+        form.addRow("AC start frequency:", self.ac_start_freq_edit)
+        
+        self.ac_stop_freq_edit = QDoubleSpinBox()
+        self.ac_stop_freq_edit.setRange(1.0, 1e12)
+        self.ac_stop_freq_edit.setValue(1e7)
+        self.ac_stop_freq_edit.setSuffix(" Hz")
+        form.addRow("AC stop frequency:", self.ac_stop_freq_edit)
+        
+        self.ac_points_edit = QSpinBox()
+        self.ac_points_edit.setRange(1, 10000)
+        self.ac_points_edit.setValue(200)
+        form.addRow("AC sweep points:", self.ac_points_edit)
+        
+        self.ac_sweep_type_combo = QComboBox()
+        self.ac_sweep_type_combo.addItem("Log (per decade)", "dec")
+        self.ac_sweep_type_combo.addItem("Linear", "lin")
+        self.ac_sweep_type_combo.setCurrentIndex(0)  # Default to "Log (per decade)"
+        form.addRow("AC sweep type:", self.ac_sweep_type_combo)
         
         # AC input source selection
         ac_source_label = QLabel("AC input source:")
@@ -804,11 +841,28 @@ class MainWindow(QMainWindow):
         netlist_layout.addWidget(self.netlist_output)
         tabs.addTab(netlist_widget, "Netlist Preview")
         
-        # Placeholder tabs for plots (stubs for now)
-        tabs.addTab(QWidget(), "AC Plot (Bode)")
+        # AC Plot (Bode) tab
+        ac_plot_widget = QWidget()
+        ac_plot_layout = QVBoxLayout(ac_plot_widget)
+        if HAS_MATPLOTLIB:
+            self.ac_plot_fig = Figure(figsize=(5, 3))
+            self.ac_plot_canvas = FigureCanvas(self.ac_plot_fig)
+            ac_plot_layout.addWidget(self.ac_plot_canvas)
+        else:
+            # Fallback: show a message if matplotlib is not available
+            no_plot_label = QLabel("Matplotlib is not installed. Please install it to view AC plots.")
+            ac_plot_layout.addWidget(no_plot_label)
+            self.ac_plot_fig = None
+            self.ac_plot_canvas = None
+        self.ac_plot_tab_index = tabs.addTab(ac_plot_widget, "AC Plot (Bode)")
+        
+        # Placeholder tabs for other plots
         tabs.addTab(QWidget(), "Noise Plot")
         tabs.addTab(QWidget(), "Transient Waveform")
         tabs.addTab(QWidget(), "FFT / THD Plot")
+        
+        # Keep a reference to the tab widget so we can switch tabs later
+        self.bottom_tabs = tabs
         
         dock.setWidget(tabs)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, dock)
@@ -1876,23 +1930,6 @@ class MainWindow(QMainWindow):
         self._refresh_ac_source_list()
         vsource_ref = self._get_selected_ac_source_ref()
 
-        # Get frequency from the Analysis Setup control
-        try:
-            if not hasattr(self, "freq_edit") or self.freq_edit is None:
-                QMessageBox.warning(self, "Error", "Analysis controls not initialized.")
-                return
-            if hasattr(self.freq_edit, "value"):
-                freq_hz = self.freq_edit.value()
-            else:
-                freq_hz = float(self.freq_edit.text())
-        except (ValueError, AttributeError):
-            QMessageBox.warning(
-                self,
-                "Invalid frequency",
-                "Please enter a numeric frequency (Hz).",
-            )
-            return
-
         # Get or load model metadata
         meta_model = self.last_model_meta
         if meta_model is None:
@@ -1931,45 +1968,59 @@ class MainWindow(QMainWindow):
             )
             return
 
-        self.log("")
-        self.log("Running single-frequency AC analysis on current schematic...")
-
-        # Measure gain at freq_hz using selected AC source and auto-detected VOUT
+        # Read AC sweep configuration from Analysis Setup
         try:
-            from core.optimization import measure_gain_spice
-            measured_gain_db = measure_gain_spice(
-                circuit,
-                freq_hz=freq_hz,
-                model_meta=meta_model,
-                vsource_ref=vsource_ref,
-            )
-        except Exception as exc:
-            QMessageBox.critical(
-                self,
-                "SPICE error",
-                f"Error during AC analysis:\n{exc}",
-            )
-            return
+            f_start = self.ac_start_freq_edit.value()
+            f_stop = self.ac_stop_freq_edit.value()
+            points = int(self.ac_points_edit.value())
+            sweep_type_data = self.ac_sweep_type_combo.currentData()
+            sweep_type = sweep_type_data if sweep_type_data is not None else "dec"
+        except AttributeError:
+            # Fallback to sensible defaults if widgets are missing
+            f_start, f_stop, points, sweep_type = 10.0, 1e7, 200, "dec"
 
-        self.log(f"AC analysis frequency: {freq_hz:.1f} Hz")
-        self.log(f"Measured gain (SPICE): {measured_gain_db:.2f} dB")
-
-        # AC sweep for bandwidth, using same AC source selection
+        # Run AC sweep using configured sweep settings and selected AC source
         try:
             from core.analysis import find_3db_bandwidth
             from core.simulator_manager import default_simulator_manager as sims
+            from core.netlist import build_ac_sweep_netlist
+            
             self.log("")
-            self.log("Running AC sweep for bandwidth (current schematic)...")
+            self.log(
+                f"Running AC sweep: {f_start:.3g} Hz → {f_stop:.3g} Hz, "
+                f"{points} points, type={sweep_type}."
+            )
+            
             ac_net = build_ac_sweep_netlist(
                 circuit,
+                f_start=f_start,
+                f_stop=f_stop,
+                points=points,
                 vsource_ref=vsource_ref,
+                sweep_type=sweep_type,
             )
             ac_res = sims.run_ac_sweep(ac_net, meta_model)
-            bw = find_3db_bandwidth(ac_res["freq_hz"], ac_res["gain_db"])
+            freq = ac_res["freq_hz"]
+            gain_db_sweep = ac_res["gain_db"]
+            
+            bw = find_3db_bandwidth(freq, gain_db_sweep)
             if bw is None:
                 self.log("Bandwidth (-3 dB): > sweep range (no rolloff found)")
             else:
                 self.log(f"Bandwidth (-3 dB): {bw/1000:.2f} kHz")
+            
+            # Update Bode plot (magnitude only for now)
+            if HAS_MATPLOTLIB and hasattr(self, "ac_plot_fig") and hasattr(self, "ac_plot_canvas") and self.ac_plot_fig is not None:
+                self.ac_plot_fig.clear()
+                ax = self.ac_plot_fig.add_subplot(111)
+                ax.semilogx(freq, gain_db_sweep)
+                ax.set_xlabel("Frequency [Hz]")
+                ax.set_ylabel("Gain [dB]")
+                ax.grid(True, which="both", linestyle=":")
+                self.ac_plot_canvas.draw()
+                # Switch to the AC plot tab
+                if hasattr(self, "bottom_tabs") and hasattr(self, "ac_plot_tab_index"):
+                    self.bottom_tabs.setCurrentIndex(self.ac_plot_tab_index)
         except Exception as exc:
             QMessageBox.critical(
                 self,
