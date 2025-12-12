@@ -474,8 +474,9 @@ class SchematicView(QGraphicsView):
                 base_width = max_span
                 base_height = max_span
             elif comp.ctype == "OPAMP":
-                # Op-amp: width from pin span
-                base_width = pin_width
+                # Op-amp: use max of pin_width and pin_height to handle rotation
+                # This ensures the selection box doesn't shrink when rotated
+                base_width = max(pin_width, pin_height)
                 base_height = base_width * svg_aspect
             else:
                 # Default: use pin distance
@@ -505,7 +506,11 @@ class SchematicView(QGraphicsView):
         rect_item.setTransformOriginPoint(0, 0)
         
         # Position rectangle at component center
-        rect_item.setPos(center_x, center_y)
+        # For BJT components, apply the same offset as the symbol (16 pixels right)
+        if comp.ctype == "Q":
+            rect_item.setPos(center_x + 16, center_y)
+        else:
+            rect_item.setPos(center_x, center_y)
         
         # Apply rotation transform if component is rotated
         if comp.rotation != 0:

@@ -19,3 +19,11 @@ git pull
 
 git remote add origin git@github.com:phrcka-invn/validation_stack.git
 
+
+
+docker exec -it <mtc_app> python -c "import os; print(os.environ.get('REQUESTS_PATHNAME_PREFIX'))"
+
+
+(base) C:\Users\phrcka\Desktop\Playground\Apps\AI_circuit_designer\src>python -m app.gui_main
+
+
