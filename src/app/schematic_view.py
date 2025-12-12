@@ -108,8 +108,10 @@ class SchematicView(QGraphicsView):
             "D": 0,
             "Q": 0,
             "M": 0,
+            "M_bulk": 0,
             "G": 0,
             "OPAMP": 0,
+            "OPAMP_ideal": 0,
             "V": 0,
             "I": 0,
             "GND": 0,
@@ -134,11 +136,15 @@ class SchematicView(QGraphicsView):
             "Q": "transistor_npn.svg",  # Default to NPN, can be overridden
             "Q_NPN": "transistor_npn.svg",
             "Q_PNP": "transistor_pnp.svg",
-            "M": "transistor_nmos.svg",  # Default to NMOS, can be overridden
+            "M": "transistor_nmos.svg",  # 3-terminal MOSFET - Default to NMOS, can be overridden
             "M_NMOS": "transistor_nmos.svg",
             "M_PMOS": "transistor_pmos.svg",
+            "M_bulk": "transistor_nmos.svg",  # 4-terminal MOSFET with bulk - Default to NMOS, can be overridden
+            "M_bulk_NMOS": "transistor_nmos_bulk.svg",
+            "M_bulk_PMOS": "transistor_pmos_bulk.svg",
             "G": "controlled_vccs.svg",
-            "OPAMP": "ic_opamp.svg",
+            "OPAMP": "ic_opamp.svg",  # 5-terminal opamp with supply pins
+            "OPAMP_ideal": "ic_opamp_ideal.svg",  # 3-terminal ideal opamp
             "V": "source_dc.svg",
             "I": "source_current.svg",
             "GND": "passive_ground.svg",
@@ -419,6 +425,14 @@ class SchematicView(QGraphicsView):
         center_x = (min(pin_x_coords) + max(pin_x_coords)) / 2
         center_y = (min(pin_y_coords) + max(pin_y_coords)) / 2
         
+        # For MOSFET components, adjust the horizontal center calculation (same as symbol rendering)
+        # 4-terminal MOSFET: pins span symmetrically (gate at x-32, bulk at x+32), so center is at x
+        # 3-terminal MOSFET: pins span from x-32 to x (no bulk), so pin-based center would be x-16
+        # To align both types, adjust 3-terminal center by adding half the missing span (16 pixels)
+        if comp.ctype == "M":
+            # For 3-terminal MOSFET, adjust center to account for missing bulk pin
+            center_x = center_x + 16.0
+        
         # Get SVG renderer to determine aspect ratio (same logic as _draw_component_svg)
         svg_key = comp.ctype
         if comp.ctype == "Q":
@@ -427,6 +441,9 @@ class SchematicView(QGraphicsView):
         elif comp.ctype == "M":
             mos_type = comp.extra.get("mos_type", "NMOS")
             svg_key = f"M_{mos_type}" if mos_type in ("NMOS", "PMOS") else "M"
+        elif comp.ctype == "M_bulk":
+            mos_type = comp.extra.get("mos_type", "NMOS")
+            svg_key = f"M_bulk_{mos_type}" if mos_type in ("NMOS", "PMOS") else "M_bulk"
         
         renderer = self._svg_renderers.get(svg_key) or self._svg_renderers.get(comp.ctype)
         if renderer:
@@ -468,12 +485,12 @@ class SchematicView(QGraphicsView):
                 # These components are taller than wide in unrotated state
                 base_height = pin_distance
                 base_width = base_height / svg_aspect if svg_aspect > 0 else base_height
-            elif comp.ctype in ("Q", "M", "G"):
+            elif comp.ctype in ("Q", "M", "M_bulk", "G"):
                 # Square components: use max span
                 max_span = max(pin_width, pin_height)
                 base_width = max_span
                 base_height = max_span
-            elif comp.ctype == "OPAMP":
+            elif comp.ctype == "OPAMP" or comp.ctype == "OPAMP_ideal":
                 # Op-amp: use max of pin_width and pin_height to handle rotation
                 # This ensures the selection box doesn't shrink when rotated
                 base_width = max(pin_width, pin_height)
@@ -561,9 +578,13 @@ class SchematicView(QGraphicsView):
             polarity = comp.extra.get("polarity", "NPN")
             svg_key = f"Q_{polarity}" if polarity in ("NPN", "PNP") else "Q"
         elif comp.ctype == "M":
-            # MOSFET: use type-specific symbol
+            # 3-terminal MOSFET: use type-specific symbol
             mos_type = comp.extra.get("mos_type", "NMOS")
             svg_key = f"M_{mos_type}" if mos_type in ("NMOS", "PMOS") else "M"
+        elif comp.ctype == "M_bulk":
+            # 4-terminal MOSFET with bulk: use type-specific symbol
+            mos_type = comp.extra.get("mos_type", "NMOS")
+            svg_key = f"M_bulk_{mos_type}" if mos_type in ("NMOS", "PMOS") else "M_bulk"
         
         # Get SVG renderer
         renderer = self._svg_renderers.get(svg_key)
@@ -590,6 +611,18 @@ class SchematicView(QGraphicsView):
         # Component center (used for symbol placement)
         center_x = (min_x + max_x) / 2
         center_y = (min_y + max_y) / 2
+        
+        # For MOSFET components, adjust the horizontal center calculation
+        # 4-terminal MOSFET: pins span symmetrically (gate at x-32, bulk at x+32), so center is at x
+        # 3-terminal MOSFET: pins span from x-32 to x (no bulk), so pin-based center would be x-16
+        # To align both types, adjust 3-terminal center by adding half the missing span (16 pixels)
+        # This ensures 3-terminal and 4-terminal MOSFETs align correctly horizontally
+        if comp.ctype == "M":
+            # For 3-terminal MOSFET, adjust center to account for missing bulk pin
+            # Pins span 32 pixels (gate at x-32 to drain/source at x), center calculated as x-16
+            # But to align with 4-terminal version, center should be at x, so add 16 pixels
+            center_x = center_x + 16.0
+        # M_bulk uses the calculated center_x from pins, which is already correct
         
         # Determine symbol size - base on pin spacing or default
         if len(comp.pins) >= 2:
@@ -653,7 +686,7 @@ class SchematicView(QGraphicsView):
                 pin_distance = (dx**2 + dy**2)**0.5
                 symbol_height = pin_distance  # Use pin distance, not pin_height (which changes with rotation)
                 symbol_width = symbol_height / svg_aspect if svg_aspect > 0 else symbol_height
-            elif comp.ctype in ("Q", "M"):
+            elif comp.ctype in ("Q", "M", "M_bulk"):
                 # 3-4 pin components: SVG pins at (0,32), (32,0), (32,64), (64,32)
                 # Pins span 64 pixels in both directions (from -32 to +32 from center)
                 # Symbol should be square, size should match the actual pin span
@@ -667,7 +700,7 @@ class SchematicView(QGraphicsView):
                 symbol_size = max_pin_span  # Use exact pin span
                 symbol_width = symbol_size
                 symbol_height = symbol_size
-            elif comp.ctype == "OPAMP":
+            elif comp.ctype == "OPAMP" or comp.ctype == "OPAMP_ideal":
                 # Op-amp: In+ at (0,24), In- at (0,40), Out at (64,32)
                 # Pins span 64 pixels horizontally in unrotated state
                 # Use pin_width for op-amps since they have 3 pins and the span is meaningful
@@ -876,7 +909,7 @@ class SchematicView(QGraphicsView):
             self._draw_resistor(comp)
         elif comp.ctype == "C":
             self._draw_capacitor(comp)
-        elif comp.ctype == "OPAMP":
+        elif comp.ctype == "OPAMP" or comp.ctype == "OPAMP_ideal":
             self._draw_opamp(comp)
         elif comp.ctype == "V":
             self._draw_voltage_source(comp)
@@ -969,7 +1002,7 @@ class SchematicView(QGraphicsView):
             if len(comp.pins) >= 1:
                 pin_x, pin_y = comp.pins[0].x, comp.pins[0].y
                 return (pin_x - padding, pin_y - padding, pin_x + padding, pin_y + padding)
-        elif comp.ctype == "OPAMP":
+        elif comp.ctype == "OPAMP" or comp.ctype == "OPAMP_ideal":
             # Op-amp: triangle, use all pin positions
             padding = 3.0
             if len(comp.pins) >= 3:
@@ -1036,13 +1069,15 @@ class SchematicView(QGraphicsView):
             type_normalized = "Q"
         elif component_type in ("MOSFET", "M"):
             type_normalized = "M"
+        elif component_type in ("MOSFET_bulk", "M_bulk"):
+            type_normalized = "M_bulk"
         elif component_type in ("VCCS", "G"):
             type_normalized = "G"
         
         prefix_map = {
             "R": "R", "C": "C", "L": "L", "D": "D",
-            "Q": "Q", "M": "M", "G": "G",
-            "OPAMP": "U", "V": "V", "I": "I",
+            "Q": "Q", "M": "M", "M_bulk": "M_bulk", "G": "G",
+            "OPAMP": "U", "OPAMP_ideal": "U", "V": "V", "I": "I",
             "GND": "GND", "VOUT": "VOUT",
         }
         prefix = prefix_map.get(type_normalized, "X")
@@ -1098,14 +1133,42 @@ class SchematicView(QGraphicsView):
         )
         return comp
 
-    def _create_opamp(self, ref: str, x: float, y: float) -> SchematicComponent:
-        """Create an op-amp component at position (x, y)."""
+    def _create_opamp_ideal(self, ref: str, x: float, y: float) -> SchematicComponent:
+        """Create an ideal op-amp component (3-terminal) at position (x, y)."""
         # SVG pins: In+ at (0,24), In- at (0,40), Out at (64,32)
         # SVG is 64x64, inputs are 8 pixels apart vertically (24 to 40 = 16 pixels, centered at 32)
         # Component center should align with SVG center (32,32)
         input_y_spacing = 8.0  # Half the spacing between inputs (16/2 = 8)
         input_x = x - 32.0  # Inputs are 32 pixels left of center (at SVG x=0)
         output_x = x + 32.0  # Output is 32 pixels right of center (at SVG x=64)
+        
+        comp = SchematicComponent(
+            ref=ref,
+            ctype="OPAMP_ideal",
+            x=x,
+            y=y,
+            rotation=0,
+            value=0.0,
+            pins=[
+                SchematicPin(name="+", x=self._snap_to_grid(input_x, y - input_y_spacing)[0], 
+                            y=self._snap_to_grid(input_x, y - input_y_spacing)[1], net=None),  # Non-inverting
+                SchematicPin(name="-", x=self._snap_to_grid(input_x, y + input_y_spacing)[0], 
+                            y=self._snap_to_grid(input_x, y + input_y_spacing)[1], net=None),  # Inverting
+                SchematicPin(name="out", x=self._snap_to_grid(output_x, y)[0], 
+                            y=self._snap_to_grid(output_x, y)[1], net=None),  # Output
+            ],
+        )
+        return comp
+    
+    def _create_opamp(self, ref: str, x: float, y: float) -> SchematicComponent:
+        """Create an op-amp component with supply terminals (5-terminal) at position (x, y)."""
+        # SVG pins: In+ at (0,24), In- at (0,40), Out at (64,32)
+        # Add supply pins: VCC (top), VEE (bottom) - positioned above and below the triangle
+        input_y_spacing = 8.0  # Half the spacing between inputs (16/2 = 8)
+        input_x = x - 32.0  # Inputs are 32 pixels left of center (at SVG x=0)
+        output_x = x + 32.0  # Output is 32 pixels right of center (at SVG x=64)
+        supply_x = x  # Supply pins at center horizontally
+        supply_y_spacing = 32.0  # Distance from center for supply pins
         
         comp = SchematicComponent(
             ref=ref,
@@ -1121,6 +1184,10 @@ class SchematicView(QGraphicsView):
                             y=self._snap_to_grid(input_x, y + input_y_spacing)[1], net=None),  # Inverting
                 SchematicPin(name="out", x=self._snap_to_grid(output_x, y)[0], 
                             y=self._snap_to_grid(output_x, y)[1], net=None),  # Output
+                SchematicPin(name="VCC", x=self._snap_to_grid(supply_x, y - supply_y_spacing)[0],
+                            y=self._snap_to_grid(supply_x, y - supply_y_spacing)[1], net=None),  # Positive supply
+                SchematicPin(name="VEE", x=self._snap_to_grid(supply_x, y + supply_y_spacing)[0],
+                            y=self._snap_to_grid(supply_x, y + supply_y_spacing)[1], net=None),  # Negative supply
             ],
         )
         return comp
@@ -1273,14 +1340,41 @@ class SchematicView(QGraphicsView):
         )
         return comp
     
-    def _create_mosfet(self, ref: str, x: float, y: float) -> SchematicComponent:
-        """Create a MOSFET component at position (x, y)."""
+    def _create_mosfet_bulk(self, ref: str, x: float, y: float) -> SchematicComponent:
+        """Create a 4-terminal MOSFET component (with bulk) at position (x, y)."""
         pin_spacing = 32.0
-        # Standard MOSFET pin layout: D (top), G (left), S (bottom), B (right, if 4-terminal)
+        # Standard MOSFET pin layout: D (top), G (left), S (bottom), B (right, 4-terminal)
         drain_x, drain_y = self._snap_to_grid(x, y - pin_spacing)
         gate_x, gate_y = self._snap_to_grid(x - pin_spacing, y)
         source_x, source_y = self._snap_to_grid(x, y + pin_spacing)
         bulk_x, bulk_y = self._snap_to_grid(x + pin_spacing, y)
+        
+        comp = SchematicComponent(
+            ref=ref,
+            ctype="M_bulk",
+            x=x,
+            y=y,
+            rotation=0,
+            value=1.0,  # unused for MOSFETs
+            pins=[
+                SchematicPin(name="D", x=drain_x, y=drain_y, net=None),  # Drain
+                SchematicPin(name="G", x=gate_x, y=gate_y, net=None),  # Gate
+                SchematicPin(name="S", x=source_x, y=source_y, net=None),  # Source
+                SchematicPin(name="B", x=bulk_x, y=bulk_y, net=None),  # Bulk/Substrate
+            ],
+            extra={
+                "mos_type": "NMOS",  # Default to NMOS
+            },
+        )
+        return comp
+    
+    def _create_mosfet(self, ref: str, x: float, y: float) -> SchematicComponent:
+        """Create a 3-terminal MOSFET component (no bulk) at position (x, y)."""
+        pin_spacing = 32.0
+        # 3-terminal MOSFET pin layout: D (top), G (left), S (bottom) - no bulk
+        drain_x, drain_y = self._snap_to_grid(x, y - pin_spacing)
+        gate_x, gate_y = self._snap_to_grid(x - pin_spacing, y)
+        source_x, source_y = self._snap_to_grid(x, y + pin_spacing)
         
         comp = SchematicComponent(
             ref=ref,
@@ -1293,7 +1387,6 @@ class SchematicView(QGraphicsView):
                 SchematicPin(name="D", x=drain_x, y=drain_y, net=None),  # Drain
                 SchematicPin(name="G", x=gate_x, y=gate_y, net=None),  # Gate
                 SchematicPin(name="S", x=source_x, y=source_y, net=None),  # Source
-                SchematicPin(name="B", x=bulk_x, y=bulk_y, net=None),  # Bulk/Substrate
             ],
             extra={
                 "mos_type": "NMOS",  # Default to NMOS
@@ -1350,10 +1443,14 @@ class SchematicView(QGraphicsView):
             comp = self._create_bjt(ref, x, y)
         elif component_type == "M" or component_type == "MOSFET":
             comp = self._create_mosfet(ref, x, y)
+        elif component_type == "M_bulk" or component_type == "MOSFET_bulk":
+            comp = self._create_mosfet_bulk(ref, x, y)
         elif component_type == "G" or component_type == "VCCS":
             comp = self._create_vccs(ref, x, y)
         elif component_type == "OPAMP":
             comp = self._create_opamp(ref, x, y)
+        elif component_type == "OPAMP_ideal":
+            comp = self._create_opamp_ideal(ref, x, y)
         elif component_type == "V":
             comp = self._create_voltage_source(ref, x, y)
         elif component_type == "I":
@@ -1960,10 +2057,14 @@ class SchematicView(QGraphicsView):
             preview_comp = self._create_bjt("PREVIEW", snapped_x, snapped_y)
         elif self._placement_type == "M" or self._placement_type == "MOSFET":
             preview_comp = self._create_mosfet("PREVIEW", snapped_x, snapped_y)
+        elif self._placement_type == "M_bulk" or self._placement_type == "MOSFET_bulk":
+            preview_comp = self._create_mosfet_bulk("PREVIEW", snapped_x, snapped_y)
         elif self._placement_type == "G" or self._placement_type == "VCCS":
             preview_comp = self._create_vccs("PREVIEW", snapped_x, snapped_y)
         elif self._placement_type == "OPAMP":
             preview_comp = self._create_opamp("PREVIEW", snapped_x, snapped_y)
+        elif self._placement_type == "OPAMP_ideal":
+            preview_comp = self._create_opamp_ideal("PREVIEW", snapped_x, snapped_y)
         elif self._placement_type == "V":
             preview_comp = self._create_voltage_source("PREVIEW", snapped_x, snapped_y)
         elif self._placement_type == "I":

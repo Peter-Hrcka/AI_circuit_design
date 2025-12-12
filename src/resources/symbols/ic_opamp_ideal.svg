@@ -10,7 +10,7 @@
    stroke-linejoin="round"
    version="1.1"
    id="svg6"
-   sodipodi:docname="ic_opamp - Copy.svg"
+   sodipodi:docname="ic_opamp.svg"
    inkscape:version="1.4.2 (f4327f4, 2025-05-13)"
    xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
    xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
@@ -95,18 +95,4 @@
      x2="23"
      y2="27"
      id="line6" />
-  <line
-     x1="31.887806"
-     y1="19.186628"
-     x2="31.887806"
-     y2="-0.86197197"
-     id="line3-9"
-     style="stroke-width:2.79848" />
-  <line
-     x1="32.073109"
-     y1="65.000275"
-     x2="32.073109"
-     y2="44.951672"
-     id="line3-9-8"
-     style="stroke-width:2.79848" />
 </svg>

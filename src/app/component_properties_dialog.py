@@ -61,11 +61,11 @@ class ComponentPropertiesDialog(QDialog):
             self._create_diode_form(layout)
         elif component.ctype == "Q":
             self._create_bjt_form(layout)
-        elif component.ctype == "M":
+        elif component.ctype == "M" or component.ctype == "M_bulk":
             self._create_mosfet_form(layout)
         elif component.ctype == "G":
             self._create_vccs_form(layout)
-        elif component.ctype == "OPAMP":
+        elif component.ctype == "OPAMP" or component.ctype == "OPAMP_ideal":
             self._create_opamp_form(layout)
         elif component.ctype == "V":
             self._create_voltage_source_form(layout)
@@ -345,7 +345,7 @@ class ComponentPropertiesDialog(QDialog):
             if "esr" in extra:
                 self.form_widgets["esr"].setValue(float(extra["esr"]))
         
-        elif self.component.ctype == "OPAMP":
+        elif self.component.ctype == "OPAMP" or self.component.ctype == "OPAMP_ideal":
             # Load op-amp properties
             if "model_file" in extra:
                 self.form_widgets["model_file"].setText(str(extra["model_file"]))
@@ -401,7 +401,7 @@ class ComponentPropertiesDialog(QDialog):
             self.result_properties["tolerance"] = self.form_widgets["tolerance"].value()
             self.result_properties["esr"] = self.form_widgets["esr"].value()
         
-        elif self.component.ctype == "OPAMP":
+        elif self.component.ctype == "OPAMP" or self.component.ctype == "OPAMP_ideal":
             # Collect op-amp properties
             model_file = self.form_widgets["model_file"].text().strip()
             # Always include model_file (even if empty) so we can clear it
@@ -445,7 +445,7 @@ class ComponentPropertiesDialog(QDialog):
                 elif "model" in self.component.extra:
                     self.result_properties["model"] = None
         
-        elif self.component.ctype == "M":
+        elif self.component.ctype == "M" or self.component.ctype == "M_bulk":
             # Collect MOSFET properties
             if "mos_type" in self.form_widgets:
                 self.result_properties["mos_type"] = self.form_widgets["mos_type"].currentText()

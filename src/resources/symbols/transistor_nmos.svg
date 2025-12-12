@@ -10,7 +10,7 @@
    stroke-linejoin="round"
    version="1.1"
    id="svg9"
-   sodipodi:docname="transistor_nmos.svg"
+   sodipodi:docname="transistor_nmos - Copy.svg"
    inkscape:version="1.4.2 (f4327f4, 2025-05-13)"
    xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
    xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
@@ -112,21 +112,17 @@
      y2="48"
      id="line9" />
   <line
-     x1="24.434944"
+     x1="23.837988"
      y1="31.762081"
-     x2="40.434944"
+     x2="32.228928"
      y2="31.762081"
-     id="line1-8" />
+     id="line1-8"
+     style="stroke-width:1.81044" />
   <line
-     x1="39.700123"
-     y1="31.762081"
-     x2="55.700123"
-     y2="31.762081"
-     id="line1-2" />
-  <line
-     x1="49.144981"
-     y1="31.796778"
-     x2="65.144981"
-     y2="31.796778"
-     id="line1-5" />
+     x1="31.99752"
+     y1="32.453594"
+     x2="31.99752"
+     y2="48.042061"
+     id="line1-2"
+     style="stroke-width:2.46764" />
 </svg>

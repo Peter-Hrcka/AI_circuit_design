@@ -306,9 +306,52 @@ def circuit_from_schematic(model: SchematicModel) -> Circuit:
             ))
         
         elif comp.ctype == "M" or comp.ctype == "MOSFET":
-            # MOSFET: 3 or 4-pin component (drain, gate, source, bulk)
+            # 3-terminal MOSFET: drain, gate, source (no bulk)
             if len(comp.pins) < 3:
                 raise ValueError(f"MOSFET {comp.ref} must have at least 3 pins, has {len(comp.pins)}")
+            
+            drain_net = None
+            gate_net = None
+            source_net = None
+            
+            # Find pins by name
+            for pin in comp.pins:
+                pin_name_upper = pin.name.upper()
+                if pin_name_upper == "D" or pin_name_upper == "DRAIN":
+                    drain_net = _canon_net(pin.net or "")
+                elif pin_name_upper == "G" or pin_name_upper == "GATE":
+                    gate_net = _canon_net(pin.net or "")
+                elif pin_name_upper == "S" or pin_name_upper == "SOURCE":
+                    source_net = _canon_net(pin.net or "")
+            
+            # If not found by name, use first 3 pins in order
+            if drain_net is None or gate_net is None or source_net is None:
+                drain_net = _canon_net(comp.pins[0].net or "")
+                gate_net = _canon_net(comp.pins[1].net or "")
+                source_net = _canon_net(comp.pins[2].net or "")
+            
+            extra = {
+                "gate_node": gate_net,
+                "mos_type": str(comp.extra.get("mos_type", "NMOS")),
+            }
+            # For 3-terminal MOSFET, bulk_node is not set (will default to source in netlist)
+            
+            if "model" in comp.extra:
+                extra["model"] = str(comp.extra["model"])
+            
+            circuit.components.append(Component(
+                ref=comp.ref,
+                ctype="M",
+                node1=drain_net,
+                node2=source_net,
+                value=1.0,  # unused for MOSFETs
+                unit="",
+                extra=extra,
+            ))
+        elif comp.ctype == "M_bulk" or comp.ctype == "MOSFET_bulk":
+            # 4-terminal MOSFET: drain, gate, source, bulk
+            if len(comp.pins) < 4:
+                raise ValueError(f"MOSFET {comp.ref} must have at least 4 pins, has {len(comp.pins)}")
             
             drain_net = None
             gate_net = None
@@ -327,8 +370,8 @@ def circuit_from_schematic(model: SchematicModel) -> Circuit:
                 elif pin_name_upper == "B" or pin_name_upper == "BULK" or pin_name_upper == "SUBSTRATE":
                     bulk_net = _canon_net(pin.net or "")
             
-            # If not found by name, use first 3 or 4 pins in order
-            if drain_net is None or gate_net is None or source_net is None:
+            # If not found by name, use first 4 pins in order
+            if drain_net is None or gate_net is None or source_net is None or bulk_net is None:
                 drain_net = _canon_net(comp.pins[0].net or "")
                 gate_net = _canon_net(comp.pins[1].net or "")
                 source_net = _canon_net(comp.pins[2].net or "")
@@ -342,7 +385,7 @@ def circuit_from_schematic(model: SchematicModel) -> Circuit:
             if bulk_net:
                 extra["bulk_node"] = bulk_net
             else:
-                # If no bulk node, default to source (common in 3-terminal MOSFETs)
+                # Default to source if bulk not found
                 extra["bulk_node"] = source_net
             
             if "model" in comp.extra:
@@ -350,7 +393,7 @@ def circuit_from_schematic(model: SchematicModel) -> Circuit:
             
             circuit.components.append(Component(
                 ref=comp.ref,
-                ctype="M",
+                ctype="M_bulk",
                 node1=drain_net,
                 node2=source_net,
                 value=1.0,  # unused for MOSFETs
@@ -450,7 +493,7 @@ def circuit_from_schematic(model: SchematicModel) -> Circuit:
                 # Store the net as an output node candidate
                 vout_nodes.append(_canon_net(pin.net))
         
-        elif comp.ctype == "OPAMP":
+        elif comp.ctype == "OPAMP" or comp.ctype == "OPAMP_ideal":
             # Op-amp: 3+ pins, needs special handling
             opamps.append(comp)
         
@@ -489,15 +532,35 @@ def circuit_from_schematic(model: SchematicModel) -> Circuit:
         # Store output node and supply rails in extra dict
         extra = {"output_node": out_net, "gain": 1e6}  # Default gain
         
+        # For OPAMP (with supply pins), also extract VCC and VEE pins
+        vcc_net = None
+        vee_net = None
+        if opamp.ctype == "OPAMP":
+            # Find supply pins by name
+            for pin in opamp.pins:
+                if pin.name.upper() == "VCC" or pin.name.upper() == "VDD":
+                    vcc_net = _canon_net(pin.net or "")
+                elif pin.name.upper() == "VEE" or pin.name.upper() == "VSS" or pin.name.upper() == "GND":
+                    vee_net = _canon_net(pin.net or "")
+            
+            # If not found by name and we have 5 pins, use pins 3 and 4
+            if not (vcc_net and vee_net) and len(opamp.pins) >= 5:
+                vcc_net = _canon_net(opamp.pins[3].net or "")
+                vee_net = _canon_net(opamp.pins[4].net or "")
+        
         # Transfer supply rails from schematic component if available
         if "vcc" in opamp.extra:
             extra["vcc"] = float(opamp.extra["vcc"])
+        elif vcc_net:
+            extra["vcc_node"] = vcc_net
         if "vee" in opamp.extra:
             extra["vee"] = float(opamp.extra["vee"])
+        elif vee_net:
+            extra["vee_node"] = vee_net
         
         circuit.components.append(Component(
             ref=opamp.ref,
-            ctype="OPAMP",
+            ctype=opamp.ctype,  # Preserve the original type (OPAMP or OPAMP_ideal)
             node1=plus_net,   # non-inverting input
             node2=minus_net,  # inverting input
             value=0.0,

@@ -28,7 +28,11 @@ class Component:
     - "Q": BJT transistor - 3-terminal (collector, base, emitter)
         node1=collector, node2=emitter, extra["base_node"]=base
         extra["polarity"]="NPN" or "PNP", extra["model"] for SPICE model
-    - "M": MOSFET - 4-terminal (drain, gate, source, bulk)
+    - "M": MOSFET - 3-terminal (drain, gate, source, bulk=source internally)
+        node1=drain, node2=source, extra["gate_node"]=gate
+        extra["mos_type"]="NMOS" or "PMOS", extra["model"] for SPICE model
+        Note: Bulk is internally set to source for 3-terminal MOSFETs
+    - "M_bulk": MOSFET - 4-terminal (drain, gate, source, bulk)
         node1=drain, node2=source, extra["gate_node"]=gate, extra["bulk_node"]=bulk (defaults to source)
         extra["mos_type"]="NMOS" or "PMOS", extra["model"] for SPICE model
     - "V": Voltage source - 2-terminal, value in volts
@@ -37,8 +41,12 @@ class Component:
         node1=output positive, node2=output negative
         extra["ctrl_p"]=control voltage positive, extra["ctrl_n"]=control voltage negative
         value = transconductance in siemens
-    - "OPAMP": Operational amplifier - 3-terminal (non-inverting, inverting, output)
+    - "OPAMP": Operational amplifier - 5-terminal (non-inverting, inverting, output, VCC, VEE)
         node1=non-inverting, node2=inverting, extra["output_node"]=output
+        extra["vcc_node"]=VCC node, extra["vee_node"]=VEE node (or use extra["vcc"]/extra["vee"] for voltage values)
+    - "OPAMP_ideal": Operational amplifier - 3-terminal (non-inverting, inverting, output, ideal/no supply pins)
+        node1=non-inverting, node2=inverting, extra["output_node"]=output
+        extra["vcc"] and extra["vee"] are optional voltage values for supply rails (defaults: 15V, -15V)
     - "GND": Ground marker - single terminal
     - "VOUT": Output marker - single terminal
 
@@ -48,12 +56,14 @@ class Component:
     - L1 between nodes "N001" and "N002" with value=10m, unit="H"
     - D1 anode/cathode with extra["model"]="DDEFAULT"
     - Q1 BJT with node1=collector, node2=emitter, extra["base_node"]=base, extra["polarity"]="NPN"
-    - M1 MOSFET with node1=drain, node2=source, extra["gate_node"]=gate, extra["mos_type"]="NMOS"
+    - M1 3-terminal MOSFET with node1=drain, node2=source, extra["gate_node"]=gate, extra["mos_type"]="NMOS"
+    - M1_bulk 4-terminal MOSFET with node1=drain, node2=source, extra["gate_node"]=gate, extra["bulk_node"]=bulk, extra["mos_type"]="NMOS"
     - G1 VCCS with node1=np, node2=nn, extra["ctrl_p"]=vp, extra["ctrl_n"]=vn, value=transconductance
-    - U1 op-amp with node1=non-inverting, node2=inverting, extra["output_node"]=output
+    - U1 op-amp (OPAMP) with node1=non-inverting, node2=inverting, extra["output_node"]=output, extra["vcc_node"]=VCC, extra["vee_node"]=VEE
+    - U1 op-amp (OPAMP_ideal) with node1=non-inverting, node2=inverting, extra["output_node"]=output
     """
     ref: str           # e.g. "R1"
-    ctype: str         # e.g. "R", "C", "L", "D", "Q", "M", "V", "I", "G", "OPAMP"
+    ctype: str         # e.g. "R", "C", "L", "D", "Q", "M", "M_bulk", "V", "I", "G", "OPAMP", "OPAMP_ideal"
     node1: str         # First terminal/node
     node2: str         # Second terminal/node (or emitter for BJT, source for MOSFET)
     value: float       # numerical value (e.g. 10000.0 for resistor, transconductance for VCCS)

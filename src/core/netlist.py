@@ -203,7 +203,20 @@ def circuit_to_spice_netlist(circuit: Circuit) -> str:
             lines.append(f"{comp.ref} {comp.node1} {base_node} {comp.node2} {model_name}")
         
         elif comp.ctype == "M":
-            # MOSFET: M<ref> drain gate source bulk model_name
+            # 3-terminal MOSFET: M<ref> drain gate source bulk model_name (bulk = source)
+            mosfets.append(comp)
+            gate_node = comp.extra.get("gate_node", "")
+            bulk_node = comp.node2  # For 3-terminal MOSFET, bulk is always source
+            if not gate_node:
+                raise ValueError(f"MOSFET {comp.ref} missing gate_node in extra dict")
+            model_name = comp.extra.get("model")
+            if not model_name:
+                # Use default model based on type
+                mos_type = comp.extra.get("mos_type", "NMOS")
+                model_name = "NMOS_DEFAULT" if str(mos_type).upper() == "NMOS" else "PMOS_DEFAULT"
+            lines.append(f"{comp.ref} {comp.node1} {gate_node} {comp.node2} {bulk_node} {model_name}")
+        elif comp.ctype == "M_bulk":
+            # 4-terminal MOSFET: M<ref> drain gate source bulk model_name
             mosfets.append(comp)
             gate_node = comp.extra.get("gate_node", "")
             bulk_node = comp.extra.get("bulk_node", comp.node2)  # Default to source if not specified
@@ -233,7 +246,7 @@ def circuit_to_spice_netlist(circuit: Circuit) -> str:
                 raise ValueError(f"VCCS {comp.ref} missing ctrl_p or ctrl_n in extra dict")
             lines.append(f"{comp.ref} {comp.node1} {comp.node2} {ctrl_p} {ctrl_n} {comp.value}")
         
-        elif comp.ctype == "OPAMP":
+        elif comp.ctype == "OPAMP" or comp.ctype == "OPAMP_ideal":
             # Op-amp: store for special handling
             opamps.append(comp)
         
@@ -277,27 +290,55 @@ def _emit_general_opamp_block(lines: List[str], opamp: Component, metadata: Dict
     Emit op-amp block for a general op-amp component.
     
     Uses node1=non-inverting, node2=inverting, and output_node from extra dict.
-    Uses supply rails from opamp.extra if available, otherwise defaults.
+    For OPAMP (with supply pins): Uses vcc_node and vee_node from extra, or supply rails from extra dict.
+    For OPAMP_ideal: Uses supply rails from extra dict if available, otherwise defaults.
     """
     plus_node = opamp.node1
     minus_node = opamp.node2
     out_node = opamp.extra.get("output_node", "Vout")
     
-    # Get supply rails from component extra properties, or use defaults
-    vcc = opamp.extra.get("vcc", 15.0)
-    vee = opamp.extra.get("vee", -15.0)
+    # Get supply rails - for OPAMP use nodes, for OPAMP_ideal use voltage values
+    if opamp.ctype == "OPAMP":
+        # Use supply node references if available
+        vcc_node = opamp.extra.get("vcc_node")
+        vee_node = opamp.extra.get("vee_node")
+        # Fallback to voltage values if nodes not set
+        vcc = opamp.extra.get("vcc", 15.0) if not vcc_node else None
+        vee = opamp.extra.get("vee", -15.0) if not vee_node else None
+    else:
+        # OPAMP_ideal: use voltage values
+        vcc = opamp.extra.get("vcc", 15.0)
+        vee = opamp.extra.get("vee", -15.0)
+        vcc_node = None
+        vee_node = None
     
     model_file = metadata.get("opamp_model_file")
     subckt_name = metadata.get("opamp_subckt_name")
     
     if model_file and subckt_name:
         # Vendor model path
-        lines.append(f'.include "{model_file}"')
-        lines.append(f"* Op-amp supply rails: VCC={vcc}V, VEE={vee}V")
-        lines.append(f"VCC VCC 0 DC {vcc}")
-        lines.append(f"VEE VEE 0 DC {vee}")
+        if opamp.ctype == "OPAMP" and vcc_node and vee_node:
+            # Use supply node references directly
+            lines.append(f'.include "{model_file}"')
+            lines.append(f"* Op-amp supply pins: VCC={vcc_node}, VEE={vee_node}")
+            # Common pin order: +IN, -IN, OUT, VCC, VEE
+            lines.append(f"X{opamp.ref} {plus_node} {minus_node} {out_node} {vcc_node} {vee_node} {subckt_name}")
+        else:
+            # Create supply voltage sources
+            vcc_name = f"VCC_{opamp.ref}"
+            vee_name = f"VEE_{opamp.ref}"
+            lines.append(f'.include "{model_file}"')
+            if vcc is not None and vee is not None:
+                lines.append(f"* Op-amp supply rails: VCC={vcc}V, VEE={vee}V")
+                lines.append(f"{vcc_name} {vcc_name} 0 DC {vcc}")
+                lines.append(f"{vee_name} {vee_name} 0 DC {vee}")
+            else:
+                # Default supplies
+                lines.append(f"* Op-amp supply rails: VCC=15V, VEE=-15V")
+                lines.append(f"{vcc_name} {vcc_name} 0 DC 15")
+                lines.append(f"{vee_name} {vee_name} 0 DC -15")
         # Common pin order: +IN, -IN, OUT, VCC, VEE
-        lines.append(f"X{opamp.ref} {plus_node} {minus_node} {out_node} VCC VEE {subckt_name}")
+            lines.append(f"X{opamp.ref} {plus_node} {minus_node} {out_node} {vcc_name} {vee_name} {subckt_name}")
     else:
         # Built-in OP284-like macromodel
         lines.append(f"* {opamp.ref}: OP284-like single-pole op-amp model")
@@ -382,6 +423,17 @@ def build_general_ac_netlist(
                 model_name = "QNPN" if str(polarity).upper() == "NPN" else "QPNP"
             lines.append(f"{comp.ref} {comp.node1} {base_node} {comp.node2} {model_name}")
         elif comp.ctype == "M":
+            # 3-terminal MOSFET: bulk = source
+            mosfets.append(comp)
+            gate_node = comp.extra.get("gate_node", "")
+            bulk_node = comp.node2  # For 3-terminal MOSFET, bulk is always source
+            model_name = comp.extra.get("model")
+            if not model_name:
+                mos_type = comp.extra.get("mos_type", "NMOS")
+                model_name = "NMOS_DEFAULT" if str(mos_type).upper() == "NMOS" else "PMOS_DEFAULT"
+            lines.append(f"{comp.ref} {comp.node1} {gate_node} {comp.node2} {bulk_node} {model_name}")
+        elif comp.ctype == "M_bulk":
+            # 4-terminal MOSFET: has separate bulk node
             mosfets.append(comp)
             gate_node = comp.extra.get("gate_node", "")
             bulk_node = comp.extra.get("bulk_node", comp.node2)
@@ -549,6 +601,17 @@ def build_ac_sweep_netlist(
                 model_name = "QNPN" if str(polarity).upper() == "NPN" else "QPNP"
             lines.append(f"{comp.ref} {comp.node1} {base_node} {comp.node2} {model_name}")
         elif comp.ctype == "M":
+            # 3-terminal MOSFET: bulk = source
+            mosfets.append(comp)
+            gate_node = comp.extra.get("gate_node", "")
+            bulk_node = comp.node2  # For 3-terminal MOSFET, bulk is always source
+            model_name = comp.extra.get("model")
+            if not model_name:
+                mos_type = comp.extra.get("mos_type", "NMOS")
+                model_name = "NMOS_DEFAULT" if str(mos_type).upper() == "NMOS" else "PMOS_DEFAULT"
+            lines.append(f"{comp.ref} {comp.node1} {gate_node} {comp.node2} {bulk_node} {model_name}")
+        elif comp.ctype == "M_bulk":
+            # 4-terminal MOSFET: has separate bulk node
             mosfets.append(comp)
             gate_node = comp.extra.get("gate_node", "")
             bulk_node = comp.extra.get("bulk_node", comp.node2)
@@ -669,6 +732,17 @@ def build_dc_netlist(circuit: Circuit) -> str:
                 model_name = "QNPN" if str(polarity).upper() == "NPN" else "QPNP"
             lines.append(f"{comp.ref} {comp.node1} {base_node} {comp.node2} {model_name}")
         elif comp.ctype == "M":
+            # 3-terminal MOSFET: bulk = source
+            mosfets.append(comp)
+            gate_node = comp.extra.get("gate_node", "")
+            bulk_node = comp.node2  # For 3-terminal MOSFET, bulk is always source
+            model_name = comp.extra.get("model")
+            if not model_name:
+                mos_type = comp.extra.get("mos_type", "NMOS")
+                model_name = "NMOS_DEFAULT" if str(mos_type).upper() == "NMOS" else "PMOS_DEFAULT"
+            lines.append(f"{comp.ref} {comp.node1} {gate_node} {comp.node2} {bulk_node} {model_name}")
+        elif comp.ctype == "M_bulk":
+            # 4-terminal MOSFET: has separate bulk node
             mosfets.append(comp)
             gate_node = comp.extra.get("gate_node", "")
             bulk_node = comp.extra.get("bulk_node", comp.node2)
@@ -803,6 +877,17 @@ def build_noise_netlist(
                 model_name = "QNPN" if str(polarity).upper() == "NPN" else "QPNP"
             lines.append(f"{comp.ref} {comp.node1} {base_node} {comp.node2} {model_name}")
         elif comp.ctype == "M":
+            # 3-terminal MOSFET: bulk = source
+            mosfets.append(comp)
+            gate_node = comp.extra.get("gate_node", "")
+            bulk_node = comp.node2  # For 3-terminal MOSFET, bulk is always source
+            model_name = comp.extra.get("model")
+            if not model_name:
+                mos_type = comp.extra.get("mos_type", "NMOS")
+                model_name = "NMOS_DEFAULT" if str(mos_type).upper() == "NMOS" else "PMOS_DEFAULT"
+            lines.append(f"{comp.ref} {comp.node1} {gate_node} {comp.node2} {bulk_node} {model_name}")
+        elif comp.ctype == "M_bulk":
+            # 4-terminal MOSFET: has separate bulk node
             mosfets.append(comp)
             gate_node = comp.extra.get("gate_node", "")
             bulk_node = comp.extra.get("bulk_node", comp.node2)

@@ -436,21 +436,39 @@ class MainWindow(QMainWindow):
         
         self.action_place_mosfet = QAction(icon("comp_mosfet.svg"), "MOSFET", self)
         self.action_place_mosfet.setCheckable(True)
-        self.action_place_mosfet.setToolTip("MOSFET")
+        self.action_place_mosfet.setToolTip("MOSFET (3-terminal)")
         self.action_place_mosfet.setShortcut(QKeySequence("M"))  # Keyboard shortcut for tool selection
         self._placement_action_to_type[self.action_place_mosfet] = "MOSFET"
         self.action_place_mosfet.triggered.connect(self.on_place_component_clicked)
         toolbar.addAction(self.action_place_mosfet)
         self.btn_place_mosfet = toolbar.widgetForAction(self.action_place_mosfet)
         
+        self.action_place_mosfet_bulk = QAction(icon("comp_mosfet.svg"), "MOSFET (Bulk)", self)
+        self.action_place_mosfet_bulk.setCheckable(True)
+        self.action_place_mosfet_bulk.setToolTip("MOSFET (4-terminal with bulk)")
+        self.action_place_mosfet_bulk.setShortcut(QKeySequence("B"))  # Keyboard shortcut for tool selection
+        self._placement_action_to_type[self.action_place_mosfet_bulk] = "MOSFET_bulk"
+        self.action_place_mosfet_bulk.triggered.connect(self.on_place_component_clicked)
+        toolbar.addAction(self.action_place_mosfet_bulk)
+        self.btn_place_mosfet_bulk = toolbar.widgetForAction(self.action_place_mosfet_bulk)
+        
         self.action_place_opamp = QAction(icon("comp_opamp.svg"), "Op-amp", self)
         self.action_place_opamp.setCheckable(True)
-        self.action_place_opamp.setToolTip("Op-amp")
+        self.action_place_opamp.setToolTip("Op-amp (with supply pins)")
         self.action_place_opamp.setShortcut(QKeySequence("O"))  # Keyboard shortcut for tool selection
         self._placement_action_to_type[self.action_place_opamp] = "OPAMP"
         self.action_place_opamp.triggered.connect(self.on_place_component_clicked)
         toolbar.addAction(self.action_place_opamp)
         self.btn_place_opamp = toolbar.widgetForAction(self.action_place_opamp)
+        
+        self.action_place_opamp_ideal = QAction(icon("comp_opamp.svg"), "Op-amp (Ideal)", self)
+        self.action_place_opamp_ideal.setCheckable(True)
+        self.action_place_opamp_ideal.setToolTip("Op-amp (ideal, no supply pins)")
+        self.action_place_opamp_ideal.setShortcut(QKeySequence("I"))  # Keyboard shortcut for tool selection
+        self._placement_action_to_type[self.action_place_opamp_ideal] = "OPAMP_ideal"
+        self.action_place_opamp_ideal.triggered.connect(self.on_place_component_clicked)
+        toolbar.addAction(self.action_place_opamp_ideal)
+        self.btn_place_opamp_ideal = toolbar.widgetForAction(self.action_place_opamp_ideal)
         
         self.action_place_voltage = QAction(icon("comp_vsource.svg"), "Voltage Source", self)
         self.action_place_voltage.setCheckable(True)
@@ -524,7 +542,9 @@ class MainWindow(QMainWindow):
             self.btn_place_diode,
             self.btn_place_bjt,
             self.btn_place_mosfet,
+            self.btn_place_mosfet_bulk,
             self.btn_place_opamp,
+            self.btn_place_opamp_ideal,
             self.btn_place_voltage,
             self.btn_place_current,
             self.btn_place_ground,
@@ -538,7 +558,9 @@ class MainWindow(QMainWindow):
             self.action_place_diode,
             self.action_place_bjt,
             self.action_place_mosfet,
+            self.action_place_mosfet_bulk,
             self.action_place_opamp,
+            self.action_place_opamp_ideal,
             self.action_place_voltage,
             self.action_place_current,
             self.action_place_ground,
@@ -606,7 +628,7 @@ class MainWindow(QMainWindow):
         """Set SchematicView as the central widget."""
         self.schematic_view = SchematicView()
         self.setCentralWidget(self.schematic_view)
-        
+
         # React to clicks on components in the schematic
         self.schematic_view.componentClicked.connect(self.on_component_clicked)
         # React to selection being cleared
@@ -637,6 +659,7 @@ class MainWindow(QMainWindow):
         semi_item.addChild(QTreeWidgetItem(["Zener diode"]))
         semi_item.addChild(QTreeWidgetItem(["BJT (NPN / PNP)"]))
         semi_item.addChild(QTreeWidgetItem(["MOSFET (NMOS / PMOS)"]))
+        semi_item.addChild(QTreeWidgetItem(["MOSFET (Bulk) (NMOS / PMOS)"]))
         semi_item.setExpanded(True)
         
         # Sources
@@ -658,7 +681,8 @@ class MainWindow(QMainWindow):
         # Op-amps
         opamp_item = QTreeWidgetItem(tree, ["Op-Amps"])
         tree.addTopLevelItem(opamp_item)
-        opamp_item.addChild(QTreeWidgetItem(["Generic op-amp symbol"]))
+        opamp_item.addChild(QTreeWidgetItem(["Op-amp (with supply pins)"]))
+        opamp_item.addChild(QTreeWidgetItem(["Op-amp (ideal, no supply pins)"]))
         opamp_item.addChild(QTreeWidgetItem(["Vendor op-amps placeholder"]))
         opamp_item.setExpanded(True)
         
@@ -884,13 +908,18 @@ class MainWindow(QMainWindow):
             "Zener diode": "D",  # For now, use D
             "BJT (NPN / PNP)": "BJT",
             "MOSFET (NMOS / PMOS)": "MOSFET",
+            "MOSFET (Bulk) (NMOS / PMOS)": "MOSFET_bulk",
+            "Op-amp (with supply pins)": "OPAMP",
+            "Op-amp (ideal, no supply pins)": "OPAMP_ideal",
+            "Vendor op-amps placeholder": "OPAMP",
             "Voltage source (DC, AC, Pulse, PWL)": "V",
             "Current source (DC, AC)": "I",
             "VCVS (E)": "E",
             "VCCS (G)": "G",
             "CCVS (H)": "H",
             "CCCS (F)": "F",
-            "Generic op-amp symbol": "OPAMP",
+            "Op-amp (with supply pins)": "OPAMP",
+            "Op-amp (ideal, no supply pins)": "OPAMP_ideal",
             "Vendor op-amps placeholder": "OPAMP",
         }
         
@@ -912,7 +941,7 @@ class MainWindow(QMainWindow):
                     return
             
             # If no action found, activate placement mode directly
-            if component_type in ["R", "C", "OPAMP", "V", "I", "GND", "VOUT"]:
+            if component_type in ["R", "C", "OPAMP", "OPAMP_ideal", "V", "I", "GND", "VOUT"]:
                 # These have actions, already handled above
                 pass
             else:
@@ -1218,7 +1247,7 @@ class MainWindow(QMainWindow):
             for comp in self.schematic_view.model.components:
                 if comp.ref == ref:
                     schematic_comp = comp
-                    break
+                break
 
         if schematic_comp is None:
             # Clear properties panel if component not found
@@ -1415,13 +1444,13 @@ class MainWindow(QMainWindow):
             if circuit_comp and "value" in properties:
                 circuit_comp.value = properties["value"]
                 # Update schematic labels from circuit
-                self._update_schematic_from_circuit(self.current_circuit)
+        self._update_schematic_from_circuit(self.current_circuit)
 
         # Update properties panel and redraw schematic
         self._update_properties_panel(schematic_comp)
         if hasattr(self, "schematic_view"):
             self.schematic_view._redraw_from_model()
-        
+
         # Log the change
         prop_str = ", ".join(f"{k}={v}" for k, v in properties.items())
         self.log(f"{self.selected_component_ref} properties updated: {prop_str}. "
