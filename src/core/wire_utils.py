@@ -3,10 +3,25 @@ Utilities for working with wires.
 """
 
 from __future__ import annotations
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Iterator
 import math
 
 from .schematic_model import SchematicWire
+
+
+def wire_segments(wire: SchematicWire) -> Iterator[Tuple[Tuple[float, float], Tuple[float, float]]]:
+    """
+    Yield all segments of a wire polyline.
+    
+    Args:
+        wire: SchematicWire with points list
+        
+    Yields:
+        ((x1, y1), (x2, y2)) for each segment
+    """
+    pts = wire.points
+    for i in range(len(pts) - 1):
+        yield pts[i], pts[i + 1]
 
 
 def point_to_line_distance(
@@ -50,7 +65,7 @@ def find_nearest_wire(
     max_dist: float = 15.0
 ) -> Tuple[Optional[SchematicWire], float, float]:
     """
-    Find the wire closest to point (x, y).
+    Find the wire closest to point (x, y) by checking all segments.
     
     Returns:
         (wire, closest_x, closest_y) or (None, x, y) if no wire is close enough.
@@ -61,15 +76,26 @@ def find_nearest_wire(
     best_point = (x, y)
     
     for wire in wires:
-        dist, closest_x, closest_y = point_to_line_distance(
-            x, y, wire.x1, wire.y1, wire.x2, wire.y2
-        )
-        
-        if dist < best_dist:
-            best_dist = dist
-            best_wire = wire
-            best_point = (closest_x, closest_y)
+        # Check all segments of the polyline
+        for (x1, y1), (x2, y2) in wire_segments(wire):
+            dist, closest_x, closest_y = point_to_line_distance(x, y, x1, y1, x2, y2)
+            
+            if dist < best_dist:
+                best_dist = dist
+                best_wire = wire
+                best_point = (closest_x, closest_y)
     
     return best_wire, best_point[0], best_point[1]
+
+
+def point_segment_distance(px: float, py: float, ax: float, ay: float, bx: float, by: float) -> float:
+    """
+    Calculate distance from a point to a line segment.
+    
+    Returns:
+        Distance from point (px, py) to segment (ax, ay) -> (bx, by).
+    """
+    dist, _, _ = point_to_line_distance(px, py, ax, ay, bx, by)
+    return dist
 
 

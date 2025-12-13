@@ -11,6 +11,7 @@ from typing import List, Dict, Set
 
 from .circuit import Circuit, Component
 from .model_metadata import ModelMetadata  # add this import at the top
+from .net_extraction import normalize_net_name
 
 
 def _emit_opamp_block(lines: List[str], circuit: Circuit) -> None:
@@ -37,10 +38,10 @@ def _emit_opamp_block(lines: List[str], circuit: Circuit) -> None:
         lines.append("VEE VEE 0 DC -15")
 
         # NOTE: You MUST match this pin order to the vendor model's .SUBCKT.
-        # This is a very common order: +IN, -IN, OUT, VCC, VEE
-        # If OP284 uses a different order, change this XU1 line accordingly.
+        # Standard subckt pin order: IN+ IN- VCC VEE OUT
+        lines.append(f"* OPAMP U1 pin order: IN+=Vplus, IN-=Vminus, VCC=VCC, VEE=VEE, OUT=Vout")
         lines.append(
-            f"XU1 Vplus Vminus Vout VCC VEE {subckt_name}"
+            f"XU1 Vplus Vminus VCC VEE Vout {subckt_name}"
         )
     else:
         # --- Built-in OP284-like macromodel (your existing behavior) ---
@@ -219,15 +220,14 @@ def circuit_to_spice_netlist(circuit: Circuit, ngspice_pspice_compat: bool = Fal
     
     Args:
         circuit: Circuit to convert to netlist
-        ngspice_pspice_compat: If True, enables ngspice PSpice compatibility mode (.options ps)
+        ngspice_pspice_compat: If True, enables ngspice PSpice compatibility mode (via spinit)
     """
     lines: List[str] = [f"* Netlist for circuit: {circuit.name}"]
     lines.append("")
     
-    # Add ngspice PSpice compatibility directive if needed
+    # Add ngspice PSpice compatibility comment if needed
     if ngspice_pspice_compat:
-        lines.append("* ngspice PSpice compatibility enabled")
-        lines.append(".options ps")
+        lines.append("* ngspice PSpice compatibility requested (enabled via spinit)")
         lines.append("")
 
     # Collect and emit model file includes
@@ -246,21 +246,21 @@ def circuit_to_spice_netlist(circuit: Circuit, ngspice_pspice_compat: bool = Fal
     for comp in circuit.components:
         if comp.ctype == "R":
             # RESISTOR: R<ref> node1 node2 value
-            lines.append(f"{comp.ref} {comp.node1} {comp.node2} {comp.value}")
+            lines.append(f"{comp.ref} {normalize_net_name(comp.node1)} {normalize_net_name(comp.node2)} {comp.value}")
         
         elif comp.ctype == "C":
             # CAPACITOR: C<ref> node1 node2 value
-            lines.append(f"{comp.ref} {comp.node1} {comp.node2} {comp.value}")
+            lines.append(f"{comp.ref} {normalize_net_name(comp.node1)} {normalize_net_name(comp.node2)} {comp.value}")
         
         elif comp.ctype == "L":
             # INDUCTOR: L<ref> node1 node2 value
-            lines.append(f"{comp.ref} {comp.node1} {comp.node2} {comp.value}")
+            lines.append(f"{comp.ref} {normalize_net_name(comp.node1)} {normalize_net_name(comp.node2)} {comp.value}")
         
         elif comp.ctype == "D":
             # DIODE: D<ref> anode cathode model_name
             diodes.append(comp)
             model_name = comp.extra.get("model", "DDEFAULT")
-            lines.append(f"{comp.ref} {comp.node1} {comp.node2} {model_name}")
+            lines.append(f"{comp.ref} {normalize_net_name(comp.node1)} {normalize_net_name(comp.node2)} {model_name}")
         
         elif comp.ctype == "Q":
             # BJT: Q<ref> collector base emitter model_name
@@ -273,7 +273,7 @@ def circuit_to_spice_netlist(circuit: Circuit, ngspice_pspice_compat: bool = Fal
                 # Use default model based on polarity
                 polarity = comp.extra.get("polarity", "NPN")
                 model_name = "QNPN" if str(polarity).upper() == "NPN" else "QPNP"
-            lines.append(f"{comp.ref} {comp.node1} {base_node} {comp.node2} {model_name}")
+            lines.append(f"{comp.ref} {normalize_net_name(comp.node1)} {normalize_net_name(base_node)} {normalize_net_name(comp.node2)} {model_name}")
         
         elif comp.ctype == "M":
             # 3-terminal MOSFET: M<ref> drain gate source bulk model_name (bulk = source)
@@ -291,7 +291,7 @@ def circuit_to_spice_netlist(circuit: Circuit, ngspice_pspice_compat: bool = Fal
                 # Warn if model_file is present but model name is missing
                 if model_file:
                     lines.append(f"* WARNING: {comp.ref} has model_file but no model name")
-            lines.append(f"{comp.ref} {comp.node1} {gate_node} {comp.node2} {bulk_node} {model_name}")
+            lines.append(f"{comp.ref} {normalize_net_name(comp.node1)} {normalize_net_name(gate_node)} {normalize_net_name(comp.node2)} {normalize_net_name(bulk_node)} {model_name}")
         elif comp.ctype == "M_bulk":
             # 4-terminal MOSFET: M<ref> drain gate source bulk model_name
             mosfets.append(comp)
@@ -308,7 +308,7 @@ def circuit_to_spice_netlist(circuit: Circuit, ngspice_pspice_compat: bool = Fal
                 # Warn if model_file is present but model name is missing
                 if model_file:
                     lines.append(f"* WARNING: {comp.ref} has model_file but no model name")
-            lines.append(f"{comp.ref} {comp.node1} {gate_node} {comp.node2} {bulk_node} {model_name}")
+            lines.append(f"{comp.ref} {normalize_net_name(comp.node1)} {normalize_net_name(gate_node)} {normalize_net_name(comp.node2)} {normalize_net_name(bulk_node)} {model_name}")
         
         elif comp.ctype == "V":
             # VOLTAGE SOURCE: V<ref> node+ node- DC value
@@ -325,7 +325,7 @@ def circuit_to_spice_netlist(circuit: Circuit, ngspice_pspice_compat: bool = Fal
             ctrl_n = comp.extra.get("ctrl_n", "")
             if not ctrl_p or not ctrl_n:
                 raise ValueError(f"VCCS {comp.ref} missing ctrl_p or ctrl_n in extra dict")
-            lines.append(f"{comp.ref} {comp.node1} {comp.node2} {ctrl_p} {ctrl_n} {comp.value}")
+            lines.append(f"{comp.ref} {normalize_net_name(comp.node1)} {normalize_net_name(comp.node2)} {normalize_net_name(ctrl_p)} {normalize_net_name(ctrl_n)} {comp.value}")
         
         elif comp.ctype == "OPAMP" or comp.ctype == "OPAMP_ideal":
             # Op-amp: store for special handling
@@ -388,8 +388,8 @@ def _emit_general_opamp_block(lines: List[str], opamp: Component, metadata: Dict
     
     if opamp.ctype == "OPAMP":
         # OPAMP requires vcc_node and vee_node from pin connections
-        vcc_node = opamp.extra.get("vcc_node")
-        vee_node = opamp.extra.get("vee_node")
+        vcc_node = normalize_net_name(opamp.extra.get("vcc_node"))
+        vee_node = normalize_net_name(opamp.extra.get("vee_node"))
         
         # Validate that both supply nodes are present
         if not vcc_node or not vee_node:
@@ -400,9 +400,10 @@ def _emit_general_opamp_block(lines: List[str], opamp: Component, metadata: Dict
         
         if model_file and subckt_name:
             # Vendor model path: emit only the subckt instance using the supply nodes
-            # Common pin order: +IN, -IN, OUT, VCC, VEE
+            # Subckt pin order: IN+ IN- VCC VEE OUT
             lines.append(f"* Op-amp {opamp.ref}: supply pins VCC={vcc_node}, VEE={vee_node}")
-            lines.append(f"X{opamp.ref} {plus_node} {minus_node} {out_node} {vcc_node} {vee_node} {subckt_name}")
+            lines.append(f"* OPAMP {opamp.ref} pin order: IN+={plus_node}, IN-={minus_node}, VCC={vcc_node}, VEE={vee_node}, OUT={out_node}")
+            lines.append(f"X{opamp.ref} {plus_node} {minus_node} {vcc_node} {vee_node} {out_node} {subckt_name}")
             return model_file
         else:
             # Built-in OP284-like macromodel (no supply pins needed for internal model)
@@ -421,13 +422,14 @@ def _emit_general_opamp_block(lines: List[str], opamp: Component, metadata: Dict
         
         if model_file and subckt_name:
             # Create supply voltage sources for OPAMP_ideal
-            vcc_name = f"VCC_{opamp.ref}"
-            vee_name = f"VEE_{opamp.ref}"
+            vcc_name = normalize_net_name(f"VCC_{opamp.ref}")
+            vee_name = normalize_net_name(f"VEE_{opamp.ref}")
             lines.append(f"* Op-amp {opamp.ref} supply rails: VCC={vcc}V, VEE={vee}V")
             lines.append(f"{vcc_name} {vcc_name} 0 DC {vcc}")
             lines.append(f"{vee_name} {vee_name} 0 DC {vee}")
-            # Common pin order: +IN, -IN, OUT, VCC, VEE
-            lines.append(f"X{opamp.ref} {plus_node} {minus_node} {out_node} {vcc_name} {vee_name} {subckt_name}")
+            # Subckt pin order: IN+ IN- VCC VEE OUT
+            lines.append(f"* OPAMP {opamp.ref} pin order: IN+={plus_node}, IN-={minus_node}, VCC={vcc_name}, VEE={vee_name}, OUT={out_node}")
+            lines.append(f"X{opamp.ref} {plus_node} {minus_node} {vcc_name} {vee_name} {out_node} {subckt_name}")
             return model_file
         else:
             # Built-in OP284-like macromodel
@@ -459,15 +461,14 @@ def build_general_ac_netlist(
         input_node: Node name for input (will add AC source if not present)
         output_node: Node name for output (for measurement)
         vsource_ref: Optional reference of voltage source to use as AC input
-        ngspice_pspice_compat: If True, enables ngspice PSpice compatibility mode (.options ps)
+        ngspice_pspice_compat: If True, enables ngspice PSpice compatibility mode (via spinit)
     """
     lines: List[str] = [f"* AC analysis for circuit: {circuit.name}"]
     lines.append("")
     
-    # Add ngspice PSpice compatibility directive if needed
+    # Add ngspice PSpice compatibility comment if needed
     if ngspice_pspice_compat:
-        lines.append("* ngspice PSpice compatibility enabled")
-        lines.append(".options ps")
+        lines.append("* ngspice PSpice compatibility requested (enabled via spinit)")
         lines.append("")
 
     # Collect and emit model file includes
@@ -519,7 +520,7 @@ def build_general_ac_netlist(
         elif comp.ctype == "D":
             diodes.append(comp)
             model_name = comp.extra.get("model", "DDEFAULT")
-            lines.append(f"{comp.ref} {comp.node1} {comp.node2} {model_name}")
+            lines.append(f"{comp.ref} {normalize_net_name(comp.node1)} {normalize_net_name(comp.node2)} {model_name}")
         elif comp.ctype == "Q":
             bjts.append(comp)
             base_node = comp.extra.get("base_node", "")
@@ -527,7 +528,7 @@ def build_general_ac_netlist(
             if not model_name:
                 polarity = comp.extra.get("polarity", "NPN")
                 model_name = "QNPN" if str(polarity).upper() == "NPN" else "QPNP"
-            lines.append(f"{comp.ref} {comp.node1} {base_node} {comp.node2} {model_name}")
+            lines.append(f"{comp.ref} {normalize_net_name(comp.node1)} {normalize_net_name(base_node)} {normalize_net_name(comp.node2)} {model_name}")
         elif comp.ctype == "M":
             # 3-terminal MOSFET: bulk = source
             mosfets.append(comp)
@@ -541,7 +542,7 @@ def build_general_ac_netlist(
                 # Warn if model_file is present but model name is missing
                 if model_file:
                     lines.append(f"* WARNING: {comp.ref} has model_file but no model name")
-            lines.append(f"{comp.ref} {comp.node1} {gate_node} {comp.node2} {bulk_node} {model_name}")
+            lines.append(f"{comp.ref} {normalize_net_name(comp.node1)} {normalize_net_name(gate_node)} {normalize_net_name(comp.node2)} {normalize_net_name(bulk_node)} {model_name}")
         elif comp.ctype == "M_bulk":
             # 4-terminal MOSFET: has separate bulk node
             mosfets.append(comp)
@@ -555,7 +556,7 @@ def build_general_ac_netlist(
                 # Warn if model_file is present but model name is missing
                 if model_file:
                     lines.append(f"* WARNING: {comp.ref} has model_file but no model name")
-            lines.append(f"{comp.ref} {comp.node1} {gate_node} {comp.node2} {bulk_node} {model_name}")
+            lines.append(f"{comp.ref} {normalize_net_name(comp.node1)} {normalize_net_name(gate_node)} {normalize_net_name(comp.node2)} {normalize_net_name(bulk_node)} {model_name}")
         elif comp.ctype == "V":
             # Already handled above
             pass
@@ -564,7 +565,7 @@ def build_general_ac_netlist(
         elif comp.ctype == "G":
             ctrl_p = comp.extra.get("ctrl_p", "")
             ctrl_n = comp.extra.get("ctrl_n", "")
-            lines.append(f"{comp.ref} {comp.node1} {comp.node2} {ctrl_p} {ctrl_n} {comp.value}")
+            lines.append(f"{comp.ref} {normalize_net_name(comp.node1)} {normalize_net_name(comp.node2)} {normalize_net_name(ctrl_p)} {normalize_net_name(ctrl_n)} {comp.value}")
         elif comp.ctype == "OPAMP" or comp.ctype == "OPAMP_ideal":
             opamps.append(comp)
     
@@ -651,15 +652,14 @@ def build_ac_sweep_netlist(
         output_node: Node name for output (for measurement)
         vsource_ref: Optional reference of voltage source to use as AC input
         sweep_type: Sweep type - "dec" for logarithmic (per decade) or "lin" for linear
-        ngspice_pspice_compat: If True, enables ngspice PSpice compatibility mode (.options ps)
+        ngspice_pspice_compat: If True, enables ngspice PSpice compatibility mode (via spinit)
     """
     lines = [f"* AC sweep for bandwidth - {circuit.name}"]
     lines.append("")
     
-    # Add ngspice PSpice compatibility directive if needed
+    # Add ngspice PSpice compatibility comment if needed
     if ngspice_pspice_compat:
-        lines.append("* ngspice PSpice compatibility enabled")
-        lines.append(".options ps")
+        lines.append("* ngspice PSpice compatibility requested (enabled via spinit)")
         lines.append("")
 
     # Collect and emit model file includes
@@ -721,7 +721,7 @@ def build_ac_sweep_netlist(
         elif comp.ctype == "D":
             diodes.append(comp)
             model_name = comp.extra.get("model", "DDEFAULT")
-            lines.append(f"{comp.ref} {comp.node1} {comp.node2} {model_name}")
+            lines.append(f"{comp.ref} {normalize_net_name(comp.node1)} {normalize_net_name(comp.node2)} {model_name}")
         elif comp.ctype == "Q":
             bjts.append(comp)
             base_node = comp.extra.get("base_node", "")
@@ -729,7 +729,7 @@ def build_ac_sweep_netlist(
             if not model_name:
                 polarity = comp.extra.get("polarity", "NPN")
                 model_name = "QNPN" if str(polarity).upper() == "NPN" else "QPNP"
-            lines.append(f"{comp.ref} {comp.node1} {base_node} {comp.node2} {model_name}")
+            lines.append(f"{comp.ref} {normalize_net_name(comp.node1)} {normalize_net_name(base_node)} {normalize_net_name(comp.node2)} {model_name}")
         elif comp.ctype == "M":
             # 3-terminal MOSFET: bulk = source
             mosfets.append(comp)
@@ -743,7 +743,7 @@ def build_ac_sweep_netlist(
                 # Warn if model_file is present but model name is missing
                 if model_file:
                     lines.append(f"* WARNING: {comp.ref} has model_file but no model name")
-            lines.append(f"{comp.ref} {comp.node1} {gate_node} {comp.node2} {bulk_node} {model_name}")
+            lines.append(f"{comp.ref} {normalize_net_name(comp.node1)} {normalize_net_name(gate_node)} {normalize_net_name(comp.node2)} {normalize_net_name(bulk_node)} {model_name}")
         elif comp.ctype == "M_bulk":
             # 4-terminal MOSFET: has separate bulk node
             mosfets.append(comp)
@@ -757,7 +757,7 @@ def build_ac_sweep_netlist(
                 # Warn if model_file is present but model name is missing
                 if model_file:
                     lines.append(f"* WARNING: {comp.ref} has model_file but no model name")
-            lines.append(f"{comp.ref} {comp.node1} {gate_node} {comp.node2} {bulk_node} {model_name}")
+            lines.append(f"{comp.ref} {normalize_net_name(comp.node1)} {normalize_net_name(gate_node)} {normalize_net_name(comp.node2)} {normalize_net_name(bulk_node)} {model_name}")
         elif comp.ctype == "V":
             # Already handled above
             pass
@@ -766,7 +766,7 @@ def build_ac_sweep_netlist(
         elif comp.ctype == "G":
             ctrl_p = comp.extra.get("ctrl_p", "")
             ctrl_n = comp.extra.get("ctrl_n", "")
-            lines.append(f"{comp.ref} {comp.node1} {comp.node2} {ctrl_p} {ctrl_n} {comp.value}")
+            lines.append(f"{comp.ref} {normalize_net_name(comp.node1)} {normalize_net_name(comp.node2)} {normalize_net_name(ctrl_p)} {normalize_net_name(ctrl_n)} {comp.value}")
         elif comp.ctype == "OPAMP" or comp.ctype == "OPAMP_ideal":
             opamps.append(comp)
     
@@ -814,7 +814,7 @@ def build_dc_netlist(circuit: Circuit, ngspice_pspice_compat: bool = False) -> s
     
     Args:
         circuit: Circuit to simulate
-        ngspice_pspice_compat: If True, enables ngspice PSpice compatibility mode (.options ps)
+        ngspice_pspice_compat: If True, enables ngspice PSpice compatibility mode (via spinit)
         
     Returns:
         SPICE netlist string for DC analysis
@@ -822,10 +822,9 @@ def build_dc_netlist(circuit: Circuit, ngspice_pspice_compat: bool = False) -> s
     lines: List[str] = [f"* DC analysis (operating point) for circuit: {circuit.name}"]
     lines.append("")
     
-    # Add ngspice PSpice compatibility directive if needed
+    # Add ngspice PSpice compatibility comment if needed
     if ngspice_pspice_compat:
-        lines.append("* ngspice PSpice compatibility enabled")
-        lines.append(".options ps")
+        lines.append("* ngspice PSpice compatibility requested (enabled via spinit)")
         lines.append("")
 
     # Collect and emit model file includes
@@ -841,10 +840,6 @@ def build_dc_netlist(circuit: Circuit, ngspice_pspice_compat: bool = False) -> s
     for comp in circuit.components:
         if comp.ctype == "V":
             has_vsource = True
-            # Use DC value from component
-            dc_value = comp.value
-            lines.append(f"{comp.ref} {comp.node1} {comp.node2} DC {dc_value}")
-            break
         elif comp.ctype == "I":
             has_isource = True
     
@@ -875,7 +870,7 @@ def build_dc_netlist(circuit: Circuit, ngspice_pspice_compat: bool = False) -> s
         elif comp.ctype == "D":
             diodes.append(comp)
             model_name = comp.extra.get("model", "DDEFAULT")
-            lines.append(f"{comp.ref} {comp.node1} {comp.node2} {model_name}")
+            lines.append(f"{comp.ref} {normalize_net_name(comp.node1)} {normalize_net_name(comp.node2)} {model_name}")
         elif comp.ctype == "Q":
             bjts.append(comp)
             base_node = comp.extra.get("base_node", "")
@@ -883,7 +878,7 @@ def build_dc_netlist(circuit: Circuit, ngspice_pspice_compat: bool = False) -> s
             if not model_name:
                 polarity = comp.extra.get("polarity", "NPN")
                 model_name = "QNPN" if str(polarity).upper() == "NPN" else "QPNP"
-            lines.append(f"{comp.ref} {comp.node1} {base_node} {comp.node2} {model_name}")
+            lines.append(f"{comp.ref} {normalize_net_name(comp.node1)} {normalize_net_name(base_node)} {normalize_net_name(comp.node2)} {model_name}")
         elif comp.ctype == "M":
             # 3-terminal MOSFET: bulk = source
             mosfets.append(comp)
@@ -897,7 +892,7 @@ def build_dc_netlist(circuit: Circuit, ngspice_pspice_compat: bool = False) -> s
                 # Warn if model_file is present but model name is missing
                 if model_file:
                     lines.append(f"* WARNING: {comp.ref} has model_file but no model name")
-            lines.append(f"{comp.ref} {comp.node1} {gate_node} {comp.node2} {bulk_node} {model_name}")
+            lines.append(f"{comp.ref} {normalize_net_name(comp.node1)} {normalize_net_name(gate_node)} {normalize_net_name(comp.node2)} {normalize_net_name(bulk_node)} {model_name}")
         elif comp.ctype == "M_bulk":
             # 4-terminal MOSFET: has separate bulk node
             mosfets.append(comp)
@@ -911,17 +906,17 @@ def build_dc_netlist(circuit: Circuit, ngspice_pspice_compat: bool = False) -> s
                 # Warn if model_file is present but model name is missing
                 if model_file:
                     lines.append(f"* WARNING: {comp.ref} has model_file but no model name")
-            lines.append(f"{comp.ref} {comp.node1} {gate_node} {comp.node2} {bulk_node} {model_name}")
+            lines.append(f"{comp.ref} {normalize_net_name(comp.node1)} {normalize_net_name(gate_node)} {normalize_net_name(comp.node2)} {normalize_net_name(bulk_node)} {model_name}")
         elif comp.ctype == "V":
-            # Already handled above
-            pass
+            # VOLTAGE SOURCE: V<ref> node+ node- DC <value>
+            lines.append(f"{comp.ref} {normalize_net_name(comp.node1)} {normalize_net_name(comp.node2)} DC {comp.value}")
         elif comp.ctype == "I":
             # CURRENT SOURCE: I<ref> node+ node- DC value
             lines.append(f"{comp.ref} {comp.node1} {comp.node2} DC {comp.value}")
         elif comp.ctype == "G":
             ctrl_p = comp.extra.get("ctrl_p", "")
             ctrl_n = comp.extra.get("ctrl_n", "")
-            lines.append(f"{comp.ref} {comp.node1} {comp.node2} {ctrl_p} {ctrl_n} {comp.value}")
+            lines.append(f"{comp.ref} {normalize_net_name(comp.node1)} {normalize_net_name(comp.node2)} {normalize_net_name(ctrl_p)} {normalize_net_name(ctrl_n)} {comp.value}")
         elif comp.ctype == "OPAMP" or comp.ctype == "OPAMP_ideal":
             opamps.append(comp)
     
@@ -977,15 +972,14 @@ def build_noise_netlist(
         input_node: Node name for input (will add AC source if not present)
         output_node: Node name for output (for measurement)
         vsource_ref: Optional reference of voltage source to use as AC input
-        ngspice_pspice_compat: If True, enables ngspice PSpice compatibility mode (.options ps)
+        ngspice_pspice_compat: If True, enables ngspice PSpice compatibility mode (via spinit)
     """
     lines = [f"* Noise analysis - {circuit.name}"]
     lines.append("")
     
-    # Add ngspice PSpice compatibility directive if needed
+    # Add ngspice PSpice compatibility comment if needed
     if ngspice_pspice_compat:
-        lines.append("* ngspice PSpice compatibility enabled")
-        lines.append(".options ps")
+        lines.append("* ngspice PSpice compatibility requested (enabled via spinit)")
         lines.append("")
 
     # Collect and emit model file includes
@@ -1043,7 +1037,7 @@ def build_noise_netlist(
         elif comp.ctype == "D":
             diodes.append(comp)
             model_name = comp.extra.get("model", "DDEFAULT")
-            lines.append(f"{comp.ref} {comp.node1} {comp.node2} {model_name}")
+            lines.append(f"{comp.ref} {normalize_net_name(comp.node1)} {normalize_net_name(comp.node2)} {model_name}")
         elif comp.ctype == "Q":
             bjts.append(comp)
             base_node = comp.extra.get("base_node", "")
@@ -1051,7 +1045,7 @@ def build_noise_netlist(
             if not model_name:
                 polarity = comp.extra.get("polarity", "NPN")
                 model_name = "QNPN" if str(polarity).upper() == "NPN" else "QPNP"
-            lines.append(f"{comp.ref} {comp.node1} {base_node} {comp.node2} {model_name}")
+            lines.append(f"{comp.ref} {normalize_net_name(comp.node1)} {normalize_net_name(base_node)} {normalize_net_name(comp.node2)} {model_name}")
         elif comp.ctype == "M":
             # 3-terminal MOSFET: bulk = source
             mosfets.append(comp)
@@ -1065,7 +1059,7 @@ def build_noise_netlist(
                 # Warn if model_file is present but model name is missing
                 if model_file:
                     lines.append(f"* WARNING: {comp.ref} has model_file but no model name")
-            lines.append(f"{comp.ref} {comp.node1} {gate_node} {comp.node2} {bulk_node} {model_name}")
+            lines.append(f"{comp.ref} {normalize_net_name(comp.node1)} {normalize_net_name(gate_node)} {normalize_net_name(comp.node2)} {normalize_net_name(bulk_node)} {model_name}")
         elif comp.ctype == "M_bulk":
             # 4-terminal MOSFET: has separate bulk node
             mosfets.append(comp)
@@ -1079,7 +1073,7 @@ def build_noise_netlist(
                 # Warn if model_file is present but model name is missing
                 if model_file:
                     lines.append(f"* WARNING: {comp.ref} has model_file but no model name")
-            lines.append(f"{comp.ref} {comp.node1} {gate_node} {comp.node2} {bulk_node} {model_name}")
+            lines.append(f"{comp.ref} {normalize_net_name(comp.node1)} {normalize_net_name(gate_node)} {normalize_net_name(comp.node2)} {normalize_net_name(bulk_node)} {model_name}")
         elif comp.ctype == "V":
             # Already handled above
             pass
@@ -1088,7 +1082,7 @@ def build_noise_netlist(
         elif comp.ctype == "G":
             ctrl_p = comp.extra.get("ctrl_p", "")
             ctrl_n = comp.extra.get("ctrl_n", "")
-            lines.append(f"{comp.ref} {comp.node1} {comp.node2} {ctrl_p} {ctrl_n} {comp.value}")
+            lines.append(f"{comp.ref} {normalize_net_name(comp.node1)} {normalize_net_name(comp.node2)} {normalize_net_name(ctrl_p)} {normalize_net_name(ctrl_n)} {comp.value}")
         elif comp.ctype == "OPAMP" or comp.ctype == "OPAMP_ideal":
             opamps.append(comp)
     

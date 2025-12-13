@@ -20,6 +20,8 @@ def generate_simulation_context_banner(
     ngspice_pspice_compat: bool = False,
     meta_original: Optional[ModelMetadata] = None,
     meta_converted: Optional[ModelMetadata] = None,
+    fallback_occurred: bool = False,
+    initial_backend: Optional[str] = None,
 ) -> str:
     """
     Generate a simulation context banner for logging.
@@ -31,6 +33,8 @@ def generate_simulation_context_banner(
         ngspice_pspice_compat: True if ngspice PSpice compatibility mode was enabled
         meta_original: Original model metadata (for warning detection)
         meta_converted: Converted model metadata (for warning detection)
+        fallback_occurred: True if automatic fallback from ngspice to Xyce occurred
+        initial_backend: Name of the backend that was tried first (if fallback occurred)
     
     Returns:
         Multi-line string banner to be logged
@@ -40,6 +44,9 @@ def generate_simulation_context_banner(
     lines.append("Simulation Context")
     lines.append("=" * 60)
     lines.append(f"Simulator: {simulator_name}")
+    
+    if fallback_occurred and initial_backend:
+        lines.append(f"Backend fallback: {initial_backend} -> {simulator_name} (MIF/code-model error)")
     
     if conversion_used:
         lines.append("Model conversion: USED")

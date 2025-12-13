@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 from typing import Tuple, List, Dict, Optional
+import re
 
 from .circuit import Circuit, Component
 from .schematic_model import SchematicModel, SchematicComponent, SchematicPin
+from .net_extraction import normalize_net_name
 
 
 def _find_value(model: SchematicModel, ref: str) -> float:
@@ -58,11 +60,11 @@ def circuit_from_non_inverting_schematic(model: SchematicModel) -> Circuit:
     plus_net = minus_net = out_net = None
     for p in comp_u1.pins:
         if p.name == "+":
-            plus_net = _canon_net(p.net or "")
+            plus_net = normalize_net_name(_canon_net(p.net or ""))
         elif p.name == "-":
-            minus_net = _canon_net(p.net or "")
+            minus_net = normalize_net_name(_canon_net(p.net or ""))
         elif p.name.upper() == "OUT":
-            out_net = _canon_net(p.net or "")
+            out_net = normalize_net_name(_canon_net(p.net or ""))
 
     if not (plus_net and minus_net and out_net):
         raise ValueError("Op-amp U1 pins (+, -, OUT) must all have nets.")
@@ -126,14 +128,21 @@ def _canon_net(net: str) -> str:
     """
     Map schematic net labels to SPICE node names used by the rest of the code.
 
-    Schematic uses: VIN, PLUS, MINUS, OUT, GND, N001, ...
-    SPICE expects:  Vin, Vplus, Vminus, Vout, 0, others passed through.
+    Schematic uses: VIN, PLUS, MINUS, OUT, GND, N001, V+, V-, ...
+    SPICE expects:  Vin, Vplus, Vminus, Vout, 0, Vplus, Vminus, ...
+    
+    Handles special characters:
+    - V+ -> Vplus
+    - V- -> Vminus
+    - Spaces -> underscores
+    - Other illegal characters -> underscores
     """
     if not net:
         return "NUNDEF"
 
     n = net.upper()
 
+    # Special mappings (case-insensitive)
     if n == "VIN":
         return "Vin"
     if n == "PLUS":
@@ -144,9 +153,38 @@ def _canon_net(net: str) -> str:
         return "Vout"
     if n in ("GND", "0"):
         return "0"
-
-    # For auto nets like N001, N002, just keep them as-is
-    return net
+    
+    # Handle V+ and V- patterns (before general sanitization)
+    if n == "V+" or n.startswith("V+"):
+        # Replace V+ with Vplus
+        result = net.replace("+", "plus").replace("V+", "Vplus")
+    elif n == "V-" or n.startswith("V-"):
+        # Replace V- with Vminus
+        result = net.replace("-", "minus").replace("V-", "Vminus")
+    else:
+        result = net
+    
+    # Sanitize for SPICE: replace illegal characters
+    # SPICE allows: A-Z, a-z, 0-9, _, ., :
+    # Replace spaces with underscores
+    result = result.replace(" ", "_")
+    # Replace + with plus (if not already handled)
+    result = result.replace("+", "plus")
+    # Replace - with minus (if not already handled)
+    result = result.replace("-", "minus")
+    
+    # Replace any remaining non-alphanumeric characters (except _, ., :) with underscore
+    result = re.sub(r'[^A-Za-z0-9_:.]', '_', result)
+    
+    # Ensure it doesn't start with a number (SPICE requirement)
+    if result and result[0].isdigit():
+        result = "N" + result
+    
+    # For auto nets like N001, N002, just keep them as-is (they should already be valid)
+    if net.startswith("N") and net[1:].isdigit():
+        return net
+    
+    return result
 
 def _get_two_pin_nets(comp: SchematicComponent) -> Tuple[str, str]:
     """
@@ -160,7 +198,7 @@ def _get_two_pin_nets(comp: SchematicComponent) -> Tuple[str, str]:
     if n1 is None or n2 is None:
         raise ValueError(f"Component {comp.ref} has unassigned pin nets.")
 
-    return _canon_net(n1), _canon_net(n2)
+    return normalize_net_name(_canon_net(n1)), normalize_net_name(_canon_net(n2))
 
 
 def circuit_from_schematic(model: SchematicModel) -> Circuit:
@@ -252,6 +290,8 @@ def circuit_from_schematic(model: SchematicModel) -> Circuit:
             extra = {}
             if "model" in comp.extra:
                 extra["model"] = str(comp.extra["model"])
+            if "ngspice_pspice_compat" in comp.extra:
+                extra["ngspice_pspice_compat"] = comp.extra["ngspice_pspice_compat"]
             
             circuit.components.append(Component(
                 ref=comp.ref,
@@ -276,17 +316,17 @@ def circuit_from_schematic(model: SchematicModel) -> Circuit:
             for pin in comp.pins:
                 pin_name_upper = pin.name.upper()
                 if pin_name_upper == "C" or pin_name_upper == "COLLECTOR":
-                    collector_net = _canon_net(pin.net or "")
+                    collector_net = normalize_net_name(_canon_net(pin.net or ""))
                 elif pin_name_upper == "B" or pin_name_upper == "BASE":
-                    base_net = _canon_net(pin.net or "")
+                    base_net = normalize_net_name(_canon_net(pin.net or ""))
                 elif pin_name_upper == "E" or pin_name_upper == "EMITTER":
-                    emitter_net = _canon_net(pin.net or "")
+                    emitter_net = normalize_net_name(_canon_net(pin.net or ""))
             
             # If not found by name, use first 3 pins in order: collector, base, emitter
             if collector_net is None or base_net is None or emitter_net is None:
-                collector_net = _canon_net(comp.pins[0].net or "")
-                base_net = _canon_net(comp.pins[1].net or "")
-                emitter_net = _canon_net(comp.pins[2].net or "")
+                collector_net = normalize_net_name(_canon_net(comp.pins[0].net or ""))
+                base_net = normalize_net_name(_canon_net(comp.pins[1].net or ""))
+                emitter_net = normalize_net_name(_canon_net(comp.pins[2].net or ""))
             
             extra = {
                 "base_node": base_net,
@@ -294,6 +334,8 @@ def circuit_from_schematic(model: SchematicModel) -> Circuit:
             }
             if "model" in comp.extra:
                 extra["model"] = str(comp.extra["model"])
+            if "ngspice_pspice_compat" in comp.extra:
+                extra["ngspice_pspice_compat"] = comp.extra["ngspice_pspice_compat"]
             
             circuit.components.append(Component(
                 ref=comp.ref,
@@ -338,6 +380,12 @@ def circuit_from_schematic(model: SchematicModel) -> Circuit:
             
             if "model" in comp.extra:
                 extra["model"] = str(comp.extra["model"])
+            if "model_file" in comp.extra:
+                extra["model_file"] = comp.extra["model_file"]
+            if "ngspice_pspice_compat" in comp.extra:
+                extra["ngspice_pspice_compat"] = comp.extra["ngspice_pspice_compat"]
+            if "ngspice_pspice_compat" in comp.extra:
+                extra["ngspice_pspice_compat"] = comp.extra["ngspice_pspice_compat"]
             
             circuit.components.append(Component(
                 ref=comp.ref,
@@ -362,21 +410,21 @@ def circuit_from_schematic(model: SchematicModel) -> Circuit:
             for pin in comp.pins:
                 pin_name_upper = pin.name.upper()
                 if pin_name_upper == "D" or pin_name_upper == "DRAIN":
-                    drain_net = _canon_net(pin.net or "")
+                    drain_net = normalize_net_name(_canon_net(pin.net or ""))
                 elif pin_name_upper == "G" or pin_name_upper == "GATE":
-                    gate_net = _canon_net(pin.net or "")
+                    gate_net = normalize_net_name(_canon_net(pin.net or ""))
                 elif pin_name_upper == "S" or pin_name_upper == "SOURCE":
-                    source_net = _canon_net(pin.net or "")
+                    source_net = normalize_net_name(_canon_net(pin.net or ""))
                 elif pin_name_upper == "B" or pin_name_upper == "BULK" or pin_name_upper == "SUBSTRATE":
-                    bulk_net = _canon_net(pin.net or "")
+                    bulk_net = normalize_net_name(_canon_net(pin.net or ""))
             
             # If not found by name, use first 4 pins in order
             if drain_net is None or gate_net is None or source_net is None or bulk_net is None:
-                drain_net = _canon_net(comp.pins[0].net or "")
-                gate_net = _canon_net(comp.pins[1].net or "")
-                source_net = _canon_net(comp.pins[2].net or "")
+                drain_net = normalize_net_name(_canon_net(comp.pins[0].net or ""))
+                gate_net = normalize_net_name(_canon_net(comp.pins[1].net or ""))
+                source_net = normalize_net_name(_canon_net(comp.pins[2].net or ""))
                 if len(comp.pins) >= 4:
-                    bulk_net = _canon_net(comp.pins[3].net or "")
+                    bulk_net = normalize_net_name(_canon_net(comp.pins[3].net or ""))
             
             extra = {
                 "gate_node": gate_net,
@@ -390,6 +438,12 @@ def circuit_from_schematic(model: SchematicModel) -> Circuit:
             
             if "model" in comp.extra:
                 extra["model"] = str(comp.extra["model"])
+            if "model_file" in comp.extra:
+                extra["model_file"] = comp.extra["model_file"]
+            if "ngspice_pspice_compat" in comp.extra:
+                extra["ngspice_pspice_compat"] = comp.extra["ngspice_pspice_compat"]
+            if "ngspice_pspice_compat" in comp.extra:
+                extra["ngspice_pspice_compat"] = comp.extra["ngspice_pspice_compat"]
             
             circuit.components.append(Component(
                 ref=comp.ref,
@@ -415,20 +469,20 @@ def circuit_from_schematic(model: SchematicModel) -> Circuit:
             for pin in comp.pins:
                 pin_name_upper = pin.name.upper()
                 if pin_name_upper == "IP" or pin_name_upper == "IPOS" or pin_name_upper == "I+":
-                    ip_net = _canon_net(pin.net or "")
+                    ip_net = normalize_net_name(_canon_net(pin.net or ""))
                 elif pin_name_upper == "IN" or pin_name_upper == "INEG" or pin_name_upper == "I-":
-                    in_net = _canon_net(pin.net or "")
+                    in_net = normalize_net_name(_canon_net(pin.net or ""))
                 elif pin_name_upper == "VP" or pin_name_upper == "VPOS" or pin_name_upper == "V+":
-                    vp_net = _canon_net(pin.net or "")
+                    vp_net = normalize_net_name(_canon_net(pin.net or ""))
                 elif pin_name_upper == "VN" or pin_name_upper == "VNEG" or pin_name_upper == "V-":
-                    vn_net = _canon_net(pin.net or "")
+                    vn_net = normalize_net_name(_canon_net(pin.net or ""))
             
             # If not found by name, use first 4 pins in order: IP, IN, VP, VN
             if ip_net is None or in_net is None or vp_net is None or vn_net is None:
-                ip_net = _canon_net(comp.pins[0].net or "")
-                in_net = _canon_net(comp.pins[1].net or "")
-                vp_net = _canon_net(comp.pins[2].net or "")
-                vn_net = _canon_net(comp.pins[3].net or "")
+                ip_net = normalize_net_name(_canon_net(comp.pins[0].net or ""))
+                in_net = normalize_net_name(_canon_net(comp.pins[1].net or ""))
+                vp_net = normalize_net_name(_canon_net(comp.pins[2].net or ""))
+                vn_net = normalize_net_name(_canon_net(comp.pins[3].net or ""))
             
             extra = {
                 "ctrl_p": vp_net,
@@ -491,7 +545,7 @@ def circuit_from_schematic(model: SchematicModel) -> Circuit:
             pin = comp.pins[0]
             if pin.net:
                 # Store the net as an output node candidate
-                vout_nodes.append(_canon_net(pin.net))
+                vout_nodes.append(normalize_net_name(_canon_net(pin.net)))
         
         elif comp.ctype == "OPAMP" or comp.ctype == "OPAMP_ideal":
             # Op-amp: 3+ pins, needs special handling
@@ -539,14 +593,14 @@ def circuit_from_schematic(model: SchematicModel) -> Circuit:
             # Find supply pins by name
             for pin in opamp.pins:
                 if pin.name.upper() == "VCC" or pin.name.upper() == "VDD":
-                    vcc_net = _canon_net(pin.net or "")
+                    vcc_net = normalize_net_name(_canon_net(pin.net or ""))
                 elif pin.name.upper() == "VEE" or pin.name.upper() == "VSS" or pin.name.upper() == "GND":
-                    vee_net = _canon_net(pin.net or "")
+                    vee_net = normalize_net_name(_canon_net(pin.net or ""))
             
             # If not found by name and we have 5 pins, use pins 3 and 4
             if not (vcc_net and vee_net) and len(opamp.pins) >= 5:
-                vcc_net = _canon_net(opamp.pins[3].net or "")
-                vee_net = _canon_net(opamp.pins[4].net or "")
+                vcc_net = normalize_net_name(_canon_net(opamp.pins[3].net or ""))
+                vee_net = normalize_net_name(_canon_net(opamp.pins[4].net or ""))
         
         # Transfer supply rails from schematic component if available
         if "vcc" in opamp.extra:
@@ -557,6 +611,14 @@ def circuit_from_schematic(model: SchematicModel) -> Circuit:
             extra["vee"] = float(opamp.extra["vee"])
         elif vee_net:
             extra["vee_node"] = vee_net
+        
+        # Copy model-related properties from schematic component
+        if "model_file" in opamp.extra:
+            extra["model_file"] = opamp.extra["model_file"]
+        if "subckt_name" in opamp.extra:
+            extra["subckt_name"] = opamp.extra["subckt_name"]
+        if "ngspice_pspice_compat" in opamp.extra:
+            extra["ngspice_pspice_compat"] = opamp.extra["ngspice_pspice_compat"]
         
         circuit.components.append(Component(
             ref=opamp.ref,

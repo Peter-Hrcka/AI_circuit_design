@@ -2,11 +2,13 @@ from __future__ import annotations
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, Optional, List
 import re
 
 from .simulator_backend import ISpiceBackend
 from .spice_runner import SpiceError   # Reuse your existing error type
+from .circuit import Circuit
+from .net_extraction import normalize_net_name
 
 
 class XyceBackend(ISpiceBackend):
@@ -49,11 +51,30 @@ class XyceBackend(ISpiceBackend):
             prn_candidates = list(tmpdir.glob("*.prn"))
 
             if not prn_candidates:
-                raise SpiceError(
-                    "Xyce did not generate .prn output.\n"
-                    f"STDOUT:\n{result.stdout}\n\n"
-                    f"STDERR:\n{result.stderr}"
-                )
+                # Extract "Solution Summary" section from stderr if present
+                stderr_lines = result.stderr.splitlines()
+                solution_summary = []
+                in_summary = False
+                for line in stderr_lines:
+                    if "Solution Summary" in line or "SOLUTION SUMMARY" in line:
+                        in_summary = True
+                        solution_summary.append(line)
+                    elif in_summary:
+                        if line.strip() and not line.strip().startswith("-"):
+                            solution_summary.append(line)
+                        elif line.strip().startswith("---"):
+                            solution_summary.append(line)
+                            break
+                
+                summary_text = "\n".join(solution_summary) if solution_summary else ""
+                
+                error_msg = "Xyce did not generate .prn output.\n\n"
+                error_msg += f"STDERR:\n{result.stderr}\n\n"
+                if summary_text:
+                    error_msg += f"Solution Summary:\n{summary_text}\n\n"
+                error_msg += f"STDOUT:\n{result.stdout}"
+                
+                raise SpiceError(error_msg)
 
             # Pick the first *.prn file (there should be exactly one)
             prn_source = prn_candidates[0]
@@ -71,7 +92,8 @@ class XyceBackend(ISpiceBackend):
     # ------------------------------------------------------------------
     # AC gain (single frequency)
     # ------------------------------------------------------------------
-    def run_ac_gain(self, netlist: str) -> Dict[str, float]:
+    def run_ac_gain(self, netlist: str, pspice_compat: bool = False) -> Dict[str, float]:
+        # Xyce doesn't need PSpice compatibility flag - ignore it
         prn = self._run_xyce_and_read_prn(netlist)
         text = prn.read_text()
 
@@ -110,7 +132,8 @@ class XyceBackend(ISpiceBackend):
     # ------------------------------------------------------------------
     # AC sweep
     # ------------------------------------------------------------------
-    def run_ac_sweep(self, netlist: str) -> Dict[str, List[float]]:
+    def run_ac_sweep(self, netlist: str, pspice_compat: bool = False) -> Dict[str, list]:
+        # Xyce doesn't need PSpice compatibility flag - ignore it
         prn = self._run_xyce_and_read_prn(netlist)
         text = prn.read_text()
 
@@ -144,19 +167,243 @@ class XyceBackend(ISpiceBackend):
         }
 
     # ------------------------------------------------------------------
-    # Noise analysis
+    # DC analysis
     # ------------------------------------------------------------------
-    def run_dc_analysis(self, netlist: str) -> Dict[str, float]:
+    def _build_print_dc_lines(self, circuit: Optional[Circuit], fallback_nodes: List[str]) -> List[str]:
+        """
+        Generate Xyce-friendly .PRINT DC lines for external nodes.
+        
+        Args:
+            circuit: Optional Circuit object to extract node names from
+            fallback_nodes: List of node names to use if circuit is not provided
+        
+        Returns:
+            List of .PRINT DC lines (typically one line with multiple V(node) entries)
+        """
+        nodes: List[str] = []
+        
+        if circuit is not None:
+            # Collect external node names from circuit components
+            node_set: set[str] = set()
+            for comp in circuit.components:
+                # Collect all node references from components
+                if comp.node1:
+                    node_set.add(comp.node1)
+                if comp.node2:
+                    node_set.add(comp.node2)
+                # Check for extra nodes in component extra dict
+                for key in ["output_node", "vcc_node", "vee_node", "gate_node", "bulk_node", "base_node", "ctrl_p", "ctrl_n"]:
+                    if key in comp.extra:
+                        node_val = comp.extra[key]
+                        if isinstance(node_val, str) and node_val.strip():
+                            node_set.add(node_val.strip())
+            
+            # Add all nodes except "0" (ground is always 0, we'll add it to result dict separately)
+            for node in sorted(node_set):
+                if node != "0":
+                    nodes.append(node)
+        else:
+            # Fallback: use provided fallback_nodes
+            # Filter out internal subckt nodes (containing . or starting with xu/x path-like tokens)
+            filtered_nodes = []
+            for node in fallback_nodes:
+                # Skip internal subckt nodes
+                if "." in node:
+                    continue
+                # Skip nodes that look like subckt internal paths
+                if node.lower().startswith(("xu", "x")) and "/" in node:
+                    continue
+                filtered_nodes.append(node)
+            
+            # Ensure uniqueness and stable ordering
+            unique_nodes = sorted(set(filtered_nodes))
+            # Add all nodes except "0" (ground is always 0, we'll add it to result dict separately)
+            for node in unique_nodes:
+                if node != "0":
+                    nodes.append(node)
+        
+        # Build .PRINT DC line (exclude "0" from print statement as ground is always 0)
+        print_nodes = [node for node in nodes if node != "0"]
+        if not print_nodes:
+            return []
+        
+        # Create .PRINT DC line with V(node) for each node
+        print_line = ".PRINT DC " + " ".join(f"V({node})" for node in print_nodes)
+        return [print_line]
+    
+    def _patch_netlist_for_xyce_dc(self, netlist: str, circuit: Optional[Circuit]) -> str:
+        """
+        Patch netlist to be Xyce-compatible for DC analysis.
+        
+        - Ensures .OP is present
+        - Removes ngspice-only .print dc lines (case-insensitive)
+        - Appends .PRINT DC ... line before .end
+        
+        Args:
+            netlist: Original netlist string
+            circuit: Optional Circuit object for node extraction
+        
+        Returns:
+            Patched netlist string
+        """
+        lines = netlist.splitlines()
+        
+        # Check if .OP is present
+        has_op = any(line.strip().upper().startswith(".OP") for line in lines)
+        if not has_op:
+            raise SpiceError("Netlist must contain .OP for DC analysis")
+        
+        # Remove ngspice-only .print dc lines (case-insensitive)
+        filtered_lines = []
+        for line in lines:
+            stripped = line.strip().upper()
+            # Skip .print dc lines (case-insensitive)
+            if stripped.startswith(".PRINT") and "DC" in stripped:
+                continue
+            filtered_lines.append(line)
+        
+        # Extract node names from netlist for fallback
+        fallback_nodes: List[str] = []
+        for line in filtered_lines:
+            # Skip comments, directives, and subckt/endsubckt
+            stripped = line.strip()
+            if not stripped or stripped.startswith("*") or stripped.startswith("."):
+                continue
+            # Skip .include lines
+            if stripped.upper().startswith(".INCLUDE"):
+                continue
+            # Parse component lines to extract node names
+            # Format: <ref> <node1> <node2> [<node3> ...] [<value>|<model>]
+            parts = stripped.split()
+            if len(parts) >= 3:
+                # First part is ref, rest are nodes and values
+                for part in parts[1:]:
+                    # Try to identify if it's a node (not a number or model name)
+                    if not part.replace(".", "").replace("-", "").replace("+", "").isdigit():
+                        # Check if it looks like a node name (starts with letter or N)
+                        if part[0].isalpha() or part.startswith("N"):
+                            fallback_nodes.append(part)
+        
+        # Build .PRINT DC lines
+        print_lines = self._build_print_dc_lines(circuit, fallback_nodes)
+        
+        # Find .end line and insert .PRINT DC before it
+        result_lines = []
+        end_found = False
+        for line in filtered_lines:
+            if line.strip().upper() == ".END":
+                # Insert .PRINT DC lines before .end
+                if print_lines:
+                    result_lines.extend(print_lines)
+                result_lines.append(line)
+                end_found = True
+            else:
+                result_lines.append(line)
+        
+        # If no .end found, append .PRINT DC and .end
+        if not end_found:
+            if print_lines:
+                result_lines.extend(print_lines)
+            result_lines.append(".end")
+        
+        return "\n".join(result_lines)
+    
+    def run_dc_analysis(self, netlist: str, circuit: Optional[Circuit] = None, pspice_compat: bool = False) -> Dict[str, float]:
         """
         Xyce DC operating point analysis.
-        Note: This is a placeholder - Xyce DC analysis parsing would need
-        to be implemented based on Xyce's output format.
+        
+        Args:
+            netlist: SPICE netlist string (must contain .OP)
+            circuit: Optional Circuit object for node extraction
+            pspice_compat: Ignored (Xyce doesn't need PSpice compatibility flag)
+        
+        Returns:
+            Dictionary mapping node names to DC voltages (in volts)
+            Example: {"0": 0.0, "N001": 2.5, "N002": 5.0, ...}
         """
-        # For now, delegate to ngspice-style parsing if possible
-        # In a full implementation, this would parse Xyce's .op output
-        raise NotImplementedError("DC analysis for Xyce backend not yet implemented")
+        # Patch netlist for Xyce
+        patched_netlist = self._patch_netlist_for_xyce_dc(netlist, circuit)
+        
+        # Run Xyce and get .prn file
+        prn = self._run_xyce_and_read_prn(patched_netlist)
+        text = prn.read_text()
+        
+        # Parse .prn output
+        lines = text.splitlines()
+        
+        # Find header line (contains column names like V(N001), V(N002), etc.)
+        header_line = None
+        header_idx = -1
+        for i, line in enumerate(lines):
+            if "V(" in line.upper() or "INDEX" in line.upper():
+                header_line = line
+                header_idx = i
+                break
+        
+        if header_line is None:
+            raise SpiceError("Could not find header line in Xyce DC output (.prn)")
+        
+        # Parse header to extract node names
+        header_parts = header_line.split()
+        node_names: List[str] = []
+        for part in header_parts:
+            # Look for V(Nxxx) patterns
+            if part.upper().startswith("V(") and part.endswith(")"):
+                node_name = part[2:-1]  # Extract Nxxx from V(Nxxx)
+                node_names.append(node_name)
+        
+        if not node_names:
+            raise SpiceError("Could not parse node names from Xyce DC header")
+        
+        # Find first numeric data line (OP generally has one row)
+        data_line = None
+        for i in range(header_idx + 1, len(lines)):
+            line = lines[i].strip()
+            if not line or line.startswith("*"):
+                continue
+            # Try to parse as numeric
+            parts = line.split()
+            try:
+                # Skip index if present, then parse voltages
+                float_parts = [float(p) for p in parts]
+                data_line = parts
+                break
+            except ValueError:
+                continue
+        
+        if data_line is None:
+            raise SpiceError("Could not parse Xyce DC operating point (.prn) output.")
+        
+        # Map V(Nxxx) columns to numeric values
+        # Skip index column if present (first column)
+        voltage_values: List[float] = []
+        try:
+            # Try to parse all parts as floats
+            float_parts = [float(p) for p in data_line]
+            # If first part looks like an index (small integer), skip it
+            if len(float_parts) > len(node_names) and float_parts[0] < 1000:
+                voltage_values = float_parts[1:1+len(node_names)]
+            else:
+                voltage_values = float_parts[:len(node_names)]
+        except ValueError:
+            raise SpiceError("Could not parse numeric values from Xyce DC output")
+        
+        if len(voltage_values) != len(node_names):
+            raise SpiceError(f"Mismatch between node count ({len(node_names)}) and voltage count ({len(voltage_values)}) in Xyce DC output")
+        
+        # Build result dictionary with normalized node names
+        result: Dict[str, float] = {"0": 0.0}  # Ground is always 0
+        for node_name, voltage in zip(node_names, voltage_values):
+            normalized_node = normalize_net_name(node_name)
+            result[normalized_node] = voltage
+        
+        if not result or len(result) == 1:  # Only ground
+            raise SpiceError("Could not parse Xyce DC operating point (.prn) output.")
+        
+        return result
     
-    def run_noise_sweep(self, netlist: str) -> Dict[str, float | List[float]]:
+    def run_noise_sweep(self, netlist: str, pspice_compat: bool = False) -> Dict[str, list | float]:
+        # Xyce doesn't need PSpice compatibility flag - ignore it
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir = Path(tmpdir)
             net_path = tmpdir / "noise.cir"

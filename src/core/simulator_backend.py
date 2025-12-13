@@ -12,7 +12,7 @@ Later you can add:
 """
 
 from abc import ABC, abstractmethod
-from typing import Dict
+from typing import Dict, Optional
 
 from .spice_runner import (
     run_spice_ac_gain,
@@ -21,6 +21,7 @@ from .spice_runner import (
     run_spice_dc_analysis,
     SpiceError,
 )
+from .circuit import Circuit
 
 
 class ISpiceBackend(ABC):
@@ -34,25 +35,27 @@ class ISpiceBackend(ABC):
     name: str
 
     @abstractmethod
-    def run_ac_gain(self, netlist: str) -> Dict[str, float]:
+    def run_ac_gain(self, netlist: str, pspice_compat: bool = False) -> Dict[str, float]:
         """
         Single-frequency AC gain:
         - netlist must contain one `.ac` point and `.print ac vm(Vout) vm(Vin)`
         - returns e.g. {"gain_db": ..., "vm_vout": ..., "vm_vin": ...}
+        - pspice_compat: If True, enables ngspice PSpice compatibility mode
         """
         raise NotImplementedError
 
     @abstractmethod
-    def run_ac_sweep(self, netlist: str) -> Dict[str, list]:
+    def run_ac_sweep(self, netlist: str, pspice_compat: bool = False) -> Dict[str, list]:
         """
         Multi-point AC sweep:
         - netlist must contain `.ac ... f_start f_stop` and `.print ac ...`
         - returns e.g. {"freq_hz": [...], "vm_vout": [...], "gain_db": [...]}
+        - pspice_compat: If True, enables ngspice PSpice compatibility mode
         """
         raise NotImplementedError
 
     @abstractmethod
-    def run_noise_sweep(self, netlist: str) -> Dict[str, list | float]:
+    def run_noise_sweep(self, netlist: str, pspice_compat: bool = False) -> Dict[str, list | float]:
         """
         Noise analysis:
         - netlist must contain `.noise` and `.print noise ...`
@@ -63,16 +66,19 @@ class ISpiceBackend(ABC):
               "total_onoise_rms": float,
               "total_inoise_rms": float,
           }
+        - pspice_compat: If True, enables ngspice PSpice compatibility mode
         """
         raise NotImplementedError
     
     @abstractmethod
-    def run_dc_analysis(self, netlist: str) -> Dict[str, float]:
+    def run_dc_analysis(self, netlist: str, circuit: Optional[Circuit] = None, pspice_compat: bool = False) -> Dict[str, float]:
         """
         DC operating point analysis:
         - netlist must contain `.op` and `.print dc`
+        - circuit: Optional Circuit object for node extraction (used by Xyce backend)
         - returns dictionary mapping node names to DC voltages (in volts)
         - Example: {"0": 0.0, "Vin": 5.0, "Vout": 2.5, ...}
+        - pspice_compat: If True, enables ngspice PSpice compatibility mode
         """
         raise NotImplementedError
 
@@ -87,14 +93,15 @@ class NgSpiceBackend(ISpiceBackend):
 
     name = "ngspice"
 
-    def run_ac_gain(self, netlist: str) -> Dict[str, float]:
-        return run_spice_ac_gain(netlist)
+    def run_ac_gain(self, netlist: str, pspice_compat: bool = False) -> Dict[str, float]:
+        return run_spice_ac_gain(netlist, pspice_compat=pspice_compat)
 
-    def run_ac_sweep(self, netlist: str) -> Dict[str, list]:
-        return run_spice_ac_sweep(netlist)
+    def run_ac_sweep(self, netlist: str, pspice_compat: bool = False) -> Dict[str, list]:
+        return run_spice_ac_sweep(netlist, pspice_compat=pspice_compat)
 
-    def run_noise_sweep(self, netlist: str) -> Dict[str, list | float]:
-        return run_spice_noise_sweep(netlist)
+    def run_noise_sweep(self, netlist: str, pspice_compat: bool = False) -> Dict[str, list | float]:
+        return run_spice_noise_sweep(netlist, pspice_compat=pspice_compat)
     
-    def run_dc_analysis(self, netlist: str) -> Dict[str, float]:
-        return run_spice_dc_analysis(netlist)
+    def run_dc_analysis(self, netlist: str, circuit: Optional[Circuit] = None, pspice_compat: bool = False) -> Dict[str, float]:
+        # NgSpice doesn't use circuit parameter, but accept it for API consistency
+        return run_spice_dc_analysis(netlist, pspice_compat=pspice_compat)

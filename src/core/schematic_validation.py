@@ -83,6 +83,14 @@ def validate_schematic(model: SchematicModel) -> Tuple[bool, List[ValidationErro
             severity="error",
         ))
     
+    # 5. Check for unpowered op-amps (vendor models with floating VCC/VEE)
+    opamp_supply_errors = _check_opamp_supplies(model)
+    for error_desc in opamp_supply_errors:
+        errors.append(ValidationError(
+            message=error_desc,
+            severity="error",
+        ))
+    
     return (len(errors) == 0, errors)
 
 
@@ -326,4 +334,67 @@ def _find_short_circuits(model: SchematicModel) -> List[str]:
                             break
     
     return shorts
+
+
+def _check_opamp_supplies(model: SchematicModel) -> List[str]:
+    """
+    Check that op-amps with vendor models have their VCC and VEE pins
+    connected to nets that are driven by voltage sources.
+    
+    Returns list of error messages for unpowered op-amps.
+    """
+    errors: List[str] = []
+    
+    # Extract nets first
+    from .net_extraction import extract_nets_with_intersections
+    extract_nets_with_intersections(model)
+    
+    # Build a set of nets that are driven by voltage sources
+    nets_with_sources: Set[str] = set()
+    for comp in model.components:
+        if comp.ctype == "V":
+            # Voltage source drives both its terminals (one positive, one negative)
+            for pin in comp.pins:
+                if pin.net:
+                    nets_with_sources.add(pin.net.upper())
+    
+    # Check each OPAMP component
+    for comp in model.components:
+        if comp.ctype == "OPAMP":
+            # Check if this op-amp has a vendor model (has model_file in extra)
+            has_vendor_model = comp.extra.get("model_file") is not None
+            
+            if has_vendor_model:
+                # Find VCC and VEE pins
+                vcc_net = None
+                vee_net = None
+                
+                for pin in comp.pins:
+                    pin_name_upper = pin.name.upper()
+                    if pin_name_upper in ("VCC", "VDD"):
+                        vcc_net = pin.net.upper() if pin.net else None
+                    elif pin_name_upper in ("VEE", "VSS"):
+                        vee_net = pin.net.upper() if pin.net else None
+                
+                # If not found by name, try positional (pins 3 and 4 are often VCC/VEE)
+                if not vcc_net and len(comp.pins) >= 4:
+                    vcc_net = comp.pins[3].net.upper() if comp.pins[3].net else None
+                if not vee_net and len(comp.pins) >= 5:
+                    vee_net = comp.pins[4].net.upper() if comp.pins[4].net else None
+                
+                # Check VCC
+                if vcc_net:
+                    if vcc_net not in nets_with_sources and vcc_net not in ("0", "GND"):
+                        errors.append(f"Op-amp {comp.ref} has floating supply pin VCC (no voltage source connected).")
+                else:
+                    errors.append(f"Op-amp {comp.ref} has unconnected VCC pin.")
+                
+                # Check VEE
+                if vee_net:
+                    if vee_net not in nets_with_sources and vee_net not in ("0", "GND"):
+                        errors.append(f"Op-amp {comp.ref} has floating supply pin VEE (no voltage source connected).")
+                else:
+                    errors.append(f"Op-amp {comp.ref} has unconnected VEE pin.")
+    
+    return errors
 

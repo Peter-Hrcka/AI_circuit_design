@@ -6,11 +6,38 @@ This module handles:
 - Junction node creation
 - Net assignment and merging
 - Validation that all pins belong to nets
+- Net name normalization (canonical form)
 """
 
 from __future__ import annotations
 from typing import List, Set, Dict, Tuple, Optional
 import math
+
+
+def normalize_net_name(name: Optional[str]) -> Optional[str]:
+    """
+    Normalize net/node name to canonical form.
+    
+    Canonical rule:
+    - All net/node names are normalized to UPPERCASE
+    - Ground stays "0" (do not rename to "GND")
+    - None stays None
+    
+    This is the single source of truth for net name normalization.
+    Use this everywhere instead of calling .upper() ad-hoc.
+    
+    Args:
+        name: Net name to normalize (can be None)
+    
+    Returns:
+        Normalized net name (UPPERCASE, except "0" stays "0"), or None if input is None
+    """
+    if name is None:
+        return None
+    name = name.strip()
+    if name == "0":
+        return "0"
+    return name.upper()
 
 from .schematic_model import (
     SchematicModel,
@@ -18,7 +45,9 @@ from .schematic_model import (
     SchematicPin,
     SchematicComponent,
     SchematicJunction,
+    SchematicNetLabel,
 )
+from .wire_utils import wire_segments, point_segment_distance
 
 
 def find_line_intersection(
@@ -72,26 +101,31 @@ def find_line_intersection(
 
 def find_wire_intersections(wires: List[SchematicWire], tolerance: float = 1.0) -> List[Tuple[float, float, SchematicWire, SchematicWire]]:
     """
-    Find all intersection points between wires.
+    Find all intersection points between wires by checking all segments.
     
     Returns list of (x, y, wire1, wire2) tuples for each intersection.
     """
+    from .wire_utils import wire_segments
+    
     intersections = []
     
     for i, wire1 in enumerate(wires):
         for wire2 in wires[i+1:]:
-            intersection = find_line_intersection(
-                wire1.x1, wire1.y1, wire1.x2, wire1.y2,
-                wire2.x1, wire2.y1, wire2.x2, wire2.y2,
-                tolerance
-            )
-            if intersection:
-                intersections.append((intersection[0], intersection[1], wire1, wire2))
+            # Check all segments of both wires
+            for (x1a, y1a), (x2a, y2a) in wire_segments(wire1):
+                for (x1b, y1b), (x2b, y2b) in wire_segments(wire2):
+                    intersection = find_line_intersection(
+                        x1a, y1a, x2a, y2a,
+                        x1b, y1b, x2b, y2b,
+                        tolerance
+                    )
+                    if intersection:
+                        intersections.append((intersection[0], intersection[1], wire1, wire2))
     
     return intersections
 
 
-def extract_nets_with_intersections(model: SchematicModel, tolerance: float = 10.0) -> None:
+def extract_nets_with_intersections(model: SchematicModel, tolerance: float = 2.0) -> None:
     """
     Perform automatic net extraction, handling:
     - Explicit junction nodes (created by user)
@@ -147,60 +181,49 @@ def extract_nets_with_intersections(model: SchematicModel, tolerance: float = 10
         connectivity[id2].add(id1)
     
     # Add wire-junction connections (wire connects to explicit junction)
+    # Check all segments of each wire polyline
     for wire in model.wires:
         for x_rounded, y_rounded in junction_positions.keys():
-            # Check if wire passes through or ends at junction
-            dist1 = math.sqrt((wire.x1 - x_rounded)**2 + (wire.y1 - y_rounded)**2)
-            dist2 = math.sqrt((wire.x2 - x_rounded)**2 + (wire.y2 - y_rounded)**2)
-            # Also check if wire passes through junction (not just endpoints)
-            # Project junction point onto wire line
-            dx = wire.x2 - wire.x1
-            dy = wire.y2 - wire.y1
-            if abs(dx) < 1e-6 and abs(dy) < 1e-6:
-                continue  # Zero-length wire
-            wire_len_sq = dx*dx + dy*dy
-            t = ((x_rounded - wire.x1)*dx + (y_rounded - wire.y1)*dy) / wire_len_sq
-            if 0 <= t <= 1:
-                proj_x = wire.x1 + t*dx
-                proj_y = wire.y1 + t*dy
-                dist_to_line = math.sqrt((x_rounded - proj_x)**2 + (y_rounded - proj_y)**2)
-                if dist_to_line <= tolerance or dist1 <= tolerance or dist2 <= tolerance:
-                    junction = junction_positions[(x_rounded, y_rounded)]
+            junction = junction_positions[(x_rounded, y_rounded)]
+            # Check all segments of the wire polyline
+            for (x1, y1), (x2, y2) in wire_segments(wire):
+                # Check if junction is at segment endpoint
+                dist1 = math.sqrt((x1 - x_rounded)**2 + (y1 - y_rounded)**2)
+                dist2 = math.sqrt((x2 - x_rounded)**2 + (y2 - y_rounded)**2)
+                if dist1 <= tolerance or dist2 <= tolerance:
                     add_connection(wire, junction)
+                    break
+                # Check if junction is on segment
+                dist = point_segment_distance(x_rounded, y_rounded, x1, y1, x2, y2)
+                if dist <= tolerance:
+                    add_connection(wire, junction)
+                    break
     
     # Add wire-pin connections (pin is at wire endpoint or on wire segment)
+    # Check all segments of each wire polyline
     for comp in model.components:
         for pin in comp.pins:
             for wire in model.wires:
-                # Check if pin is at wire endpoint
-                dist1 = math.sqrt((wire.x1 - pin.x)**2 + (wire.y1 - pin.y)**2)
-                dist2 = math.sqrt((wire.x2 - pin.x)**2 + (wire.y2 - pin.y)**2)
+                # Check all segments of the wire polyline
+                for (x1, y1), (x2, y2) in wire_segments(wire):
+                    # Check if pin is at segment endpoint
+                    dist1 = math.sqrt((x1 - pin.x)**2 + (y1 - pin.y)**2)
+                    dist2 = math.sqrt((x2 - pin.x)**2 + (y2 - pin.y)**2)
+                    if dist1 <= tolerance or dist2 <= tolerance:
+                        add_connection(pin, wire)
+                        break
+                    # Check if pin is on segment
+                    dist = point_segment_distance(pin.x, pin.y, x1, y1, x2, y2)
+                    if dist <= tolerance:
+                        add_connection(pin, wire)
+                        break
                 
-                # Also check if pin is on the wire segment (for Manhattan routing)
-                # Project pin onto wire line and check distance
-                dx = wire.x2 - wire.x1
-                dy = wire.y2 - wire.y1
-                wire_len_sq = dx*dx + dy*dy
-                
-                is_on_segment = False
-                if wire_len_sq > 1e-6:  # Non-zero length wire
-                    t = ((pin.x - wire.x1)*dx + (pin.y - wire.y1)*dy) / wire_len_sq
-                    if 0 <= t <= 1:  # Projection is within segment
-                        proj_x = wire.x1 + t*dx
-                        proj_y = wire.y1 + t*dy
-                        dist_to_line = math.sqrt((pin.x - proj_x)**2 + (pin.y - proj_y)**2)
-                        if dist_to_line <= tolerance:
-                            is_on_segment = True
-                
-                # Connect if pin is at endpoint or on segment
-                if dist1 <= tolerance or dist2 <= tolerance or is_on_segment:
-                    add_connection(pin, wire)
-                    # Also connect to junction if pin is at junction position
-                    x_rounded = round(pin.x / tolerance) * tolerance
-                    y_rounded = round(pin.y / tolerance) * tolerance
-                    junction = junction_positions.get((x_rounded, y_rounded))
-                    if junction:
-                        add_connection(pin, junction)
+                # Also connect to junction if pin is at junction position
+                x_rounded = round(pin.x / tolerance) * tolerance
+                y_rounded = round(pin.y / tolerance) * tolerance
+                junction = junction_positions.get((x_rounded, y_rounded))
+                if junction:
+                    add_connection(pin, junction)
     
     # Add pin-junction connections (pin is at junction)
     for comp in model.components:
@@ -211,18 +234,38 @@ def extract_nets_with_intersections(model: SchematicModel, tolerance: float = 10
             if junction:
                 add_connection(pin, junction)
     
-    # Add wire-wire connections (wires that share endpoints or are very close)
+    # Add wire-wire connections (wires that share endpoints or intersect)
+    # Check all segments of both wires
     for i, wire1 in enumerate(model.wires):
         for wire2 in model.wires[i+1:]:
-            # Check if wires share an endpoint
-            dist_1_1 = math.sqrt((wire1.x1 - wire2.x1)**2 + (wire1.y1 - wire2.y1)**2)
-            dist_1_2 = math.sqrt((wire1.x1 - wire2.x2)**2 + (wire1.y1 - wire2.y2)**2)
-            dist_2_1 = math.sqrt((wire1.x2 - wire2.x1)**2 + (wire1.y2 - wire2.y1)**2)
-            dist_2_2 = math.sqrt((wire1.x2 - wire2.x2)**2 + (wire1.y2 - wire2.y2)**2)
+            connected = False
+            # Check if any endpoints are close (within tolerance)
+            for pt1 in wire1.points:
+                for pt2 in wire2.points:
+                    dist = math.sqrt((pt1[0] - pt2[0])**2 + (pt1[1] - pt2[1])**2)
+                    if dist <= tolerance:
+                        add_connection(wire1, wire2)
+                        connected = True
+                        break
+                if connected:
+                    break
             
-            # If any endpoints are close (within tolerance), connect the wires
-            if dist_1_1 <= tolerance or dist_1_2 <= tolerance or dist_2_1 <= tolerance or dist_2_2 <= tolerance:
-                add_connection(wire1, wire2)
+            # Also check for segment intersections (for crossing wires with junctions)
+            if not connected:
+                for (x1a, y1a), (x2a, y2a) in wire_segments(wire1):
+                    for (x1b, y1b), (x2b, y2b) in wire_segments(wire2):
+                        # Check if segments share an endpoint
+                        if (abs(x1a - x1b) < tolerance and abs(y1a - y1b) < tolerance) or \
+                           (abs(x1a - x2b) < tolerance and abs(y1a - y2b) < tolerance) or \
+                           (abs(x2a - x1b) < tolerance and abs(y2a - y1b) < tolerance) or \
+                           (abs(x2a - x2b) < tolerance and abs(y2a - y2b) < tolerance):
+                            add_connection(wire1, wire2)
+                            connected = True
+                            break
+                        # Check for intersection (for Manhattan routing, this is simple)
+                        # For now, only connect if endpoints coincide (junctions required for crossings)
+                    if connected:
+                        break
     
     # SPECIAL CASE: Connect all GND component pins together
     # All ground components share the same ground net, so their pins should be connected
@@ -236,6 +279,46 @@ def extract_nets_with_intersections(model: SchematicModel, tolerance: float = 10
     for i, pin1 in enumerate(gnd_pins):
         for pin2 in gnd_pins[i+1:]:
             add_connection(pin1, pin2)
+    
+    # Add label connections to nearby objects (pins, junctions, wires)
+    for label in model.net_labels:
+        # Connect label to nearby pins
+        for comp in model.components:
+            for pin in comp.pins:
+                dist = math.sqrt((label.x - pin.x)**2 + (label.y - pin.y)**2)
+                if dist <= tolerance:
+                    add_connection(label, pin)
+        
+        # Connect label to nearby junctions
+        for junction in model.junctions:
+            dist = math.sqrt((label.x - junction.x)**2 + (label.y - junction.y)**2)
+            if dist <= tolerance:
+                add_connection(label, junction)
+        
+        # Connect label to nearby wires (on any wire segment)
+        for wire in model.wires:
+            for (x1, y1), (x2, y2) in wire_segments(wire):
+                dist = point_segment_distance(label.x, label.y, x1, y1, x2, y2)
+                if dist <= tolerance:
+                    add_connection(label, wire)
+                    break
+    
+    # Global merge: connect labels with the same name to each other
+    # Normalize label names (strip spaces, use uppercase for comparison, but keep original for display)
+    label_groups: Dict[str, List[SchematicNetLabel]] = {}
+    for label in model.net_labels:
+        # Use uppercase, stripped name for grouping (but keep original name in label.name)
+        key = label.name.strip().upper()
+        if key:  # Only group non-empty names
+            if key not in label_groups:
+                label_groups[key] = []
+            label_groups[key].append(label)
+    
+    # Connect all labels in each group to each other
+    for label_list in label_groups.values():
+        for i, label1 in enumerate(label_list):
+            for label2 in label_list[i+1:]:
+                add_connection(label1, label2)
     
     # Find connected components using DFS to merge nets
     visited: Set[int] = set()
@@ -259,6 +342,8 @@ def extract_nets_with_intersections(model: SchematicModel, tolerance: float = 10
     for comp in model.components:
         for pin in comp.pins:
             all_object_ids.add(get_obj_id(pin))
+    for label in model.net_labels:
+        all_object_ids.add(get_obj_id(label))
     
     for obj_id in all_object_ids:
         if obj_id not in visited:
@@ -276,18 +361,19 @@ def extract_nets_with_intersections(model: SchematicModel, tolerance: float = 10
     ground_nets = {"0", "GND", "gnd"}
     
     # First pass: identify which groups contain ground
+    # A group is ground ONLY if it contains a GND component pin, not just a "0" label
     ground_groups = set()
     for i, group in enumerate(net_groups):
         for obj in group:
-            if isinstance(obj, SchematicPin) and obj.net and obj.net.upper() in ground_nets:
-                ground_groups.add(i)
-                break
-            if isinstance(obj, SchematicWire) and obj.net and obj.net.upper() in ground_nets:
-                ground_groups.add(i)
-                break
-            if isinstance(obj, SchematicJunction) and obj.net and obj.net.upper() in ground_nets:
-                ground_groups.add(i)
-                break
+            # Check if this is a pin belonging to a GND component
+            if isinstance(obj, SchematicPin):
+                # Find the component this pin belongs to
+                for comp in model.components:
+                    if comp.ctype == "GND" and obj in comp.pins:
+                        ground_groups.add(i)
+                        break
+                if i in ground_groups:
+                    break
     
     for i, group in enumerate(net_groups):
         # Try to find an existing net name in the group
@@ -298,15 +384,36 @@ def extract_nets_with_intersections(model: SchematicModel, tolerance: float = 10
             # This group contains ground - assign it net "0"
             net_name = "0"
         else:
-            # For non-ground groups, always assign a FRESH unique net name
-            # Don't reuse existing net names from objects because they may be incorrect
-            # from previous net extraction passes. This ensures each group gets its own
-            # distinct net name based on the connectivity graph.
+            # Check if group contains any net labels - use label name as net name
+            # BUT: if label name is "0" or "GND", only use it if group is actually connected to ground
+            label_names = []
+            for obj in group:
+                if isinstance(obj, SchematicNetLabel):
+                    if obj.name and obj.name.strip():  # Non-empty label name
+                        label_name = obj.name.strip()
+                        # Don't use "0" or "GND" labels unless this is actually a ground group
+                        if label_name.upper() in ground_nets and not is_ground_group:
+                            # Skip this label - it's incorrectly placed or the group isn't actually ground
+                            continue
+                        label_names.append(label_name)
             
-            # Generate next available net number sequentially
-            # (net_counter already starts at 1, so this will generate N001, N002, etc.)
-            net_name = f"N{net_counter:03d}"
-            net_counter += 1
+            if label_names:
+                # Use label name for net (if multiple different names, pick first sorted)
+                unique_names = sorted(set(label_names))
+                if len(unique_names) > 1:
+                    # Conflict: multiple different label names in same group
+                    print(f"Warning: Net group contains multiple different label names: {unique_names}. Using '{unique_names[0]}'.")
+                net_name = unique_names[0]
+            else:
+                # For non-ground groups without labels, always assign a FRESH unique net name
+                # Don't reuse existing net names from objects because they may be incorrect
+                # from previous net extraction passes. This ensures each group gets its own
+                # distinct net name based on the connectivity graph.
+                
+                # Generate next available net number sequentially
+                # (net_counter already starts at 1, so this will generate N001, N002, etc.)
+                net_name = f"N{net_counter:03d}"
+                net_counter += 1
         
         # Assign net to all objects in group
         for obj in group:
@@ -316,6 +423,7 @@ def extract_nets_with_intersections(model: SchematicModel, tolerance: float = 10
                 obj.net = net_name
             elif isinstance(obj, SchematicJunction):
                 obj.net = net_name
+            # Note: labels don't need net assignment, they're just used for naming
 
 
 def validate_all_pins_have_nets(model: SchematicModel) -> Tuple[bool, List[str]]:

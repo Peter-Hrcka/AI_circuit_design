@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, Any
 
 from PySide6.QtWidgets import (
     QApplication,
@@ -14,11 +14,13 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QTextEdit,
+    QPlainTextEdit,
     QFileDialog,
     QMessageBox,
     QTabWidget,
     QInputDialog,
     QDialog,
+    QDialogButtonBox,
     QMenuBar,
     QMenu,
     QToolBar,
@@ -35,7 +37,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
 )
 from PySide6.QtCore import Qt, QSize
-from PySide6.QtGui import QShortcut, QKeySequence, QAction, QIcon
+from PySide6.QtGui import QShortcut, QKeySequence, QAction, QIcon, QClipboard
 
 # Optional matplotlib imports for plotting
 try:
@@ -71,6 +73,7 @@ from core.model_conversion import maybe_convert_to_simple_opamp
 from core.model_metadata import ModelMetadata
 from core.simulator_manager import default_simulator_manager as sims
 from core.simulation_context import generate_simulation_context_banner
+from core.net_extraction import normalize_net_name
 from core.netlist import _needs_ngspice_pspice_compat
 from core.optimization import (
     optimize_gain_for_non_inverting_stage,
@@ -85,6 +88,55 @@ from core.schematic_to_circuit import (
 )
 from core.schematic_validation import validate_schematic, ValidationError
 from core.schematic_model import SchematicModel
+
+
+class SimulationErrorDialog(QDialog):
+    """
+    Dialog for displaying simulation errors with full log output.
+    
+    Shows the complete error message including netlist, stdout, stderr, and log
+    in a scrollable text area.
+    """
+    
+    def __init__(self, parent=None, title: str = "Simulation Error", error_text: str = ""):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setMinimumSize(800, 600)
+        
+        layout = QVBoxLayout(self)
+        
+        # Title label
+        title_label = QLabel(f"<b>{title}</b>")
+        layout.addWidget(title_label)
+        
+        # Scrollable text area with full error details
+        self.text_area = QPlainTextEdit()
+        self.text_area.setReadOnly(True)
+        self.text_area.setPlainText(error_text)
+        self.text_area.setFont(QApplication.font())  # Use monospace if available
+        layout.addWidget(self.text_area)
+        
+        # Buttons
+        button_box = QHBoxLayout()
+        
+        copy_btn = QPushButton("Copy to Clipboard")
+        copy_btn.clicked.connect(self._copy_to_clipboard)
+        button_box.addWidget(copy_btn)
+        
+        button_box.addStretch()
+        
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        close_btn.setDefault(True)
+        button_box.addWidget(close_btn)
+        
+        layout.addLayout(button_box)
+    
+    def _copy_to_clipboard(self):
+        """Copy error text to clipboard."""
+        from PySide6.QtGui import QGuiApplication
+        clipboard = QGuiApplication.clipboard()
+        clipboard.setText(self.text_area.toPlainText())
 
 
 def _build_node_to_net_mapping(model: SchematicModel, circuit) -> dict[str, list[str]]:
@@ -512,7 +564,7 @@ class MainWindow(QMainWindow):
         self.action_place_net_label.setCheckable(True)
         self.action_place_net_label.setToolTip("Net Label")
         self.action_place_net_label.setShortcut(QKeySequence("N"))  # Keyboard shortcut for tool selection
-        self.action_place_net_label.triggered.connect(lambda: self._stub_action("Place Net Label")())
+        self.action_place_net_label.triggered.connect(self.on_mode_net_label)
         toolbar.addAction(self.action_place_net_label)
         self.btn_place_net_label = toolbar.widgetForAction(self.action_place_net_label)
         
@@ -1348,14 +1400,16 @@ class MainWindow(QMainWindow):
         circuit,
         meta_original: Optional[ModelMetadata] = None,
         meta_converted: Optional[ModelMetadata] = None,
+        diagnostics: Optional[Dict[str, Any]] = None,
     ) -> None:
         """
-        Log simulation context banner.
+        Log simulation context in a compact format.
         
         Args:
             circuit: Circuit object
             meta_original: Original model metadata (before conversion)
             meta_converted: Converted model metadata (after conversion, if any)
+            diagnostics: Optional diagnostics dict from simulator manager (may contain fallback info)
         """
         if circuit is None:
             return
@@ -1365,16 +1419,31 @@ class MainWindow(QMainWindow):
             meta_original, meta_converted, circuit
         )
         
-        # Generate and log banner
-        banner = generate_simulation_context_banner(
-            simulator_name=simulator_name,
-            conversion_used=conversion_used,
-            run_mode=run_mode,
-            ngspice_pspice_compat=ngspice_pspice_compat,
-            meta_original=meta_original,
-            meta_converted=meta_converted,
-        )
-        self.log(banner)
+        # Extract fallback info from diagnostics if available
+        fallback_occurred = False
+        initial_backend = None
+        if diagnostics:
+            fallback_occurred = diagnostics.get("fallback_occurred", False)
+            initial_backend = diagnostics.get("initial_backend")
+            # Use final_backend from diagnostics if available (may differ from get_simulation_context)
+            if "final_backend" in diagnostics:
+                simulator_name = diagnostics["final_backend"]
+        
+        # Log simulator used
+        if fallback_occurred and initial_backend:
+            # For DC analysis fallback, mention MIF/code-model error
+            if simulator_name.lower() == "xyce" and initial_backend.lower() == "ngspice":
+                self.log(f"Simulator used: {simulator_name} (fallback from {initial_backend}: MIF/code-model error)")
+            else:
+                self.log(f"Simulator used: {simulator_name} (fallback from {initial_backend})")
+        else:
+            self.log(f"Simulator used: {simulator_name}")
+        
+        # Log model handling
+        if conversion_used:
+            self.log("Model handling: converted/simplified model")
+        else:
+            self.log("Model handling: original vendor model")
     
     def _clear_opamp_model_file(self):
         """Clear OPAMP model file."""
@@ -1931,7 +2000,13 @@ class MainWindow(QMainWindow):
 
 
         except Exception as exc:
-            QMessageBox.critical(self, "SPICE error", f"Error during SPICE optimization:\n{exc}")
+            error_text = str(exc)
+            dialog = SimulationErrorDialog(
+                self,
+                title="SPICE Optimization Error",
+                error_text=error_text
+            )
+            dialog.exec()
             return
 
         self.log("")
@@ -1950,12 +2025,14 @@ class MainWindow(QMainWindow):
 
         # 5) Bandwidth via AC sweep
         self.log("Running AC sweep for bandwidth...")
-        # Log simulation context
-        self._log_simulation_context(final_circuit, self.last_model_meta_original, meta_model)
         # Get PSpice compatibility flag
         pspice_compat = _needs_ngspice_pspice_compat(final_circuit)
         ac_net = build_ac_sweep_netlist(final_circuit, ngspice_pspice_compat=pspice_compat)
-        ac_res = sims.run_ac_sweep(ac_net, meta_model, circuit=final_circuit)
+        # Capture diagnostics for fallback tracking
+        ac_diagnostics = {}
+        ac_res = sims.run_ac_sweep(ac_net, meta_model, circuit=final_circuit, diagnostics_out=ac_diagnostics)
+        # Log simulation context with actual backend used (may differ if fallback occurred)
+        self._log_simulation_context(final_circuit, self.last_model_meta_original, meta_model, diagnostics=ac_diagnostics)
         bw = find_3db_bandwidth(ac_res["freq_hz"], ac_res["gain_db"])
         if bw is None:
             self.log("Bandwidth (-3 dB): > sweep range (no rolloff found)")
@@ -1965,8 +2042,13 @@ class MainWindow(QMainWindow):
 
         # 6) Noise analysis
         self.log("Running noise analysis (10 Hz – 20 kHz).")
-        noise_net = build_noise_netlist(final_circuit)
-        noise_res = sims.run_noise_sweep(noise_net, meta_model)
+        pspice_compat = _needs_ngspice_pspice_compat(final_circuit)
+        noise_net = build_noise_netlist(final_circuit, ngspice_pspice_compat=pspice_compat)
+        # Capture diagnostics for fallback tracking
+        noise_diagnostics = {}
+        noise_res = sims.run_noise_sweep(noise_net, meta_model, circuit=final_circuit, diagnostics_out=noise_diagnostics)
+        # Log simulation context with actual backend used (may differ if fallback occurred)
+        self._log_simulation_context(final_circuit, self.last_model_meta_original, meta_model, diagnostics=noise_diagnostics)
 
         onoise = noise_res["total_onoise_rms"]
         inoise = noise_res["total_inoise_rms"]
@@ -2380,7 +2462,13 @@ class MainWindow(QMainWindow):
                 vsource_ref=vsource_ref,
             )
         except Exception as exc:
-            QMessageBox.critical(self, "SPICE error", f"Error during SPICE re-simulation:\n{exc}")
+            error_text = str(exc)
+            dialog = SimulationErrorDialog(
+                self,
+                title="SPICE Re-simulation Error",
+                error_text=error_text
+            )
+            dialog.exec()
             return
 
         # Log current circuit values
@@ -2398,11 +2486,13 @@ class MainWindow(QMainWindow):
         if meta_model is not None:  # Only if we have a model
             self.log("")
             self.log("Running AC sweep for bandwidth (current schematic)...")
-            # Log simulation context
-            self._log_simulation_context(circuit, self.last_model_meta_original, meta_model)
             pspice_compat = _needs_ngspice_pspice_compat(circuit)
             ac_net = build_ac_sweep_netlist(circuit, vsource_ref=vsource_ref, ngspice_pspice_compat=pspice_compat)
-            ac_res = sims.run_ac_sweep(ac_net, meta_model, circuit=circuit)
+            # Capture diagnostics for fallback tracking
+            ac_diagnostics = {}
+            ac_res = sims.run_ac_sweep(ac_net, meta_model, circuit=circuit, diagnostics_out=ac_diagnostics)
+            # Log simulation context with actual backend used (may differ if fallback occurred)
+            self._log_simulation_context(circuit, self.last_model_meta_original, meta_model, diagnostics=ac_diagnostics)
             bw = find_3db_bandwidth(ac_res["freq_hz"], ac_res["gain_db"])
         else:
             bw = None
@@ -2414,8 +2504,13 @@ class MainWindow(QMainWindow):
         # Noise analysis with current values
         self.log("")
         self.log("Running noise analysis (10 Hz – 20 kHz, current schematic).")
-        noise_net = build_noise_netlist(self.current_circuit, vsource_ref=vsource_ref)
-        noise_res = sims.run_noise_sweep(noise_net, meta_model)
+        pspice_compat = _needs_ngspice_pspice_compat(self.current_circuit)
+        noise_net = build_noise_netlist(self.current_circuit, vsource_ref=vsource_ref, ngspice_pspice_compat=pspice_compat)
+        # Capture diagnostics for fallback tracking
+        noise_diagnostics = {}
+        noise_res = sims.run_noise_sweep(noise_net, meta_model, circuit=self.current_circuit, diagnostics_out=noise_diagnostics)
+        # Log simulation context with actual backend used (may differ if fallback occurred)
+        self._log_simulation_context(self.current_circuit, self.last_model_meta_original, meta_model, diagnostics=noise_diagnostics)
 
         onoise = noise_res["total_onoise_rms"]
         inoise = noise_res["total_inoise_rms"]
@@ -2434,7 +2529,14 @@ class MainWindow(QMainWindow):
     def on_mode_wire(self):
         self._update_mode_buttons(False)
         self._clear_placement_buttons()
+        self.action_place_net_label.setChecked(False)
         self.schematic_view.set_mode("wire")
+    
+    def on_mode_net_label(self):
+        """Handle Net Label tool activation."""
+        self._update_mode_buttons(False)
+        self._clear_placement_buttons()
+        self.schematic_view.set_mode("net_label")
 
     def on_place_component_clicked(self):
         """Handle component placement action trigger."""
@@ -2454,6 +2556,7 @@ class MainWindow(QMainWindow):
         # Uncheck mode actions
         self.action_pointer.setChecked(False)
         self.action_wire.setChecked(False)
+        self.action_place_net_label.setChecked(False)
         
         # Set placement mode in schematic view
         if sender_action.isChecked():
@@ -2552,6 +2655,7 @@ class MainWindow(QMainWindow):
         for act in self._placement_actions:
             act.setChecked(False)
         self.action_delete.setChecked(False)
+        self.action_place_net_label.setChecked(False)
 
     def on_simulate_from_schematic(self) -> None:
         """
@@ -2644,11 +2748,13 @@ class MainWindow(QMainWindow):
         # Optional: AC sweep with these values
         self.log("")
         self.log("Running AC sweep for bandwidth (schematic circuit).")
-        # Log simulation context
-        self._log_simulation_context(circuit, self.last_model_meta_original, meta_model)
         pspice_compat = _needs_ngspice_pspice_compat(circuit)
         ac_net = build_ac_sweep_netlist(circuit, vsource_ref=vsource_ref, ngspice_pspice_compat=pspice_compat)
-        ac_res = sims.run_ac_sweep(ac_net, meta_model, circuit=circuit)
+        # Capture diagnostics for fallback tracking
+        ac_diagnostics = {}
+        ac_res = sims.run_ac_sweep(ac_net, meta_model, circuit=circuit, diagnostics_out=ac_diagnostics)
+        # Log simulation context with actual backend used (may differ if fallback occurred)
+        self._log_simulation_context(circuit, self.last_model_meta_original, meta_model, diagnostics=ac_diagnostics)
         bw = find_3db_bandwidth(ac_res["freq_hz"], ac_res["gain_db"])
         if bw is None:
             self.log("Bandwidth (-3 dB): > sweep range (no rolloff found)")
@@ -2691,8 +2797,6 @@ class MainWindow(QMainWindow):
         try:
             # Get model metadata (use stored or None for built-in)
             meta_model = self.last_model_meta
-            # Log simulation context
-            self._log_simulation_context(circuit, self.last_model_meta_original, meta_model)
             pspice_compat = _needs_ngspice_pspice_compat(circuit)
             dc_netlist = build_dc_netlist(circuit, ngspice_pspice_compat=pspice_compat)
         except Exception as exc:
@@ -2705,13 +2809,19 @@ class MainWindow(QMainWindow):
         
         # Run DC analysis
         try:
-            nodal_voltages = sims.run_dc_analysis(dc_netlist, meta_model, circuit=circuit)
+            # Capture diagnostics for fallback tracking
+            dc_diagnostics = {}
+            nodal_voltages = sims.run_dc_analysis(dc_netlist, meta_model, circuit=circuit, diagnostics_out=dc_diagnostics)
+            # Log simulation context with actual backend used (may differ if fallback occurred)
+            self._log_simulation_context(circuit, self.last_model_meta_original, meta_model, diagnostics=dc_diagnostics)
         except Exception as exc:
-            QMessageBox.critical(
+            error_text = str(exc)
+            dialog = SimulationErrorDialog(
                 self,
-                "DC Analysis Error",
-                f"Error during DC analysis:\n{exc}",
+                title="DC Analysis Error",
+                error_text=error_text
             )
+            dialog.exec()
             return
         
         # Display results
@@ -2745,45 +2855,47 @@ class MainWindow(QMainWindow):
             self.log(f"DEBUG: Node to net map has {len(node_to_net_map)} entries")
             
             # Convert DC analysis results to use schematic net names
-            # Also normalize case for matching
+            # Normalize all node names for matching
+            normalized_voltages = {}
+            for node, voltage in nodal_voltages.items():
+                normalized_node = normalize_net_name(node)
+                # If we have duplicates after normalization, keep the first one
+                if normalized_node not in normalized_voltages:
+                    normalized_voltages[normalized_node] = voltage
+            
+            # Debug assertion: check for duplicates after normalization
+            all_normalized = [normalize_net_name(node) for node in nodal_voltages.keys()]
+            if len(all_normalized) != len(set(all_normalized)):
+                duplicates = [n for n in all_normalized if all_normalized.count(n) > 1]
+                self.log(f"Warning: Duplicate net names detected after normalization — this indicates a bug: {set(duplicates)}")
+            
+            # Map normalized circuit node names to schematic net names
             schematic_voltages = {}
             
-            # Create a case-insensitive lookup map for circuit nodes
-            circuit_node_lower_map = {node.lower(): node for node in nodal_voltages.keys()}
-            
-            for circuit_node, voltage in nodal_voltages.items():
+            for circuit_node, voltage in normalized_voltages.items():
+                # Normalize circuit node for matching
+                normalized_circuit_node = normalize_net_name(circuit_node)
+                
                 # Find corresponding schematic net(s) for this circuit node
                 # A circuit node might map to multiple schematic nets if they were merged
                 schematic_nets = node_to_net_map.get(circuit_node, [])
                 
-                # Also try case-insensitive lookup in the mapping
+                # Also try normalized lookup in the mapping
                 if not schematic_nets:
-                    circuit_node_lower = circuit_node.lower()
                     for mapped_node, nets in node_to_net_map.items():
-                        if mapped_node.lower() == circuit_node_lower:
+                        if normalize_net_name(mapped_node) == normalized_circuit_node:
                             schematic_nets = nets
                             break
                 
                 # Add voltage to all mapped schematic nets
                 if schematic_nets:
                     for net in schematic_nets:
-                        schematic_voltages[net] = voltage
+                        # Normalize schematic net name
+                        normalized_net = normalize_net_name(net)
+                        schematic_voltages[normalized_net] = voltage
                 else:
-                    # If no mapping found, use the circuit node name directly
-                    # (in case it matches a schematic net name)
-                    schematic_voltages[circuit_node] = voltage
-            
-            # Also create case-insensitive mappings for common nets
-            # Map both uppercase and lowercase versions
-            for net_name, voltage in list(schematic_voltages.items()):
-                net_lower = net_name.lower()
-                net_upper = net_name.upper()
-                # Add lowercase version if original was uppercase
-                if net_name == net_upper and net_lower not in schematic_voltages:
-                    schematic_voltages[net_lower] = voltage
-                # Add uppercase version if original was lowercase
-                if net_name == net_lower and net_upper not in schematic_voltages:
-                    schematic_voltages[net_upper] = voltage
+                    # If no mapping found, use the normalized circuit node name directly
+                    schematic_voltages[normalized_circuit_node] = voltage
             
             self.log(f"DEBUG: Mapped to {len(schematic_voltages)} schematic net voltages")
             for net, volt in sorted(schematic_voltages.items()):
@@ -2869,8 +2981,6 @@ class MainWindow(QMainWindow):
                 f"{points} points, type={sweep_type}."
             )
             
-            # Log simulation context
-            self._log_simulation_context(circuit, self.last_model_meta_original, meta_model)
             pspice_compat = _needs_ngspice_pspice_compat(circuit)
             ac_net = build_ac_sweep_netlist(
                 circuit,
@@ -2881,7 +2991,11 @@ class MainWindow(QMainWindow):
                 sweep_type=sweep_type,
                 ngspice_pspice_compat=pspice_compat,
             )
-            ac_res = sims.run_ac_sweep(ac_net, meta_model, circuit=circuit)
+            # Capture diagnostics for fallback tracking
+            ac_diagnostics = {}
+            ac_res = sims.run_ac_sweep(ac_net, meta_model, circuit=circuit, diagnostics_out=ac_diagnostics)
+            # Log simulation context with actual backend used (may differ if fallback occurred)
+            self._log_simulation_context(circuit, self.last_model_meta_original, meta_model, diagnostics=ac_diagnostics)
             freq = ac_res["freq_hz"]
             gain_db_sweep = ac_res["gain_db"]
             
@@ -2904,11 +3018,13 @@ class MainWindow(QMainWindow):
                 if hasattr(self, "bottom_tabs") and hasattr(self, "ac_plot_tab_index"):
                     self.bottom_tabs.setCurrentIndex(self.ac_plot_tab_index)
         except Exception as exc:
-            QMessageBox.critical(
+            error_text = str(exc)
+            dialog = SimulationErrorDialog(
                 self,
-                "AC Sweep Error",
-                f"Error during AC sweep:\n{exc}",
+                title="AC Sweep Error",
+                error_text=error_text
             )
+            dialog.exec()
             return
 
         self.log("AC analysis done.")

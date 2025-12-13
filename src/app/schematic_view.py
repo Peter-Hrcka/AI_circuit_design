@@ -1,11 +1,12 @@
 # src/app/schematic_view.py
 
-from PySide6.QtWidgets import QGraphicsView, QGraphicsScene, QGraphicsLineItem, QGraphicsEllipseItem, QGraphicsTextItem, QGraphicsPolygonItem, QGraphicsRectItem
+from PySide6.QtWidgets import QGraphicsView, QGraphicsScene, QGraphicsLineItem, QGraphicsEllipseItem, QGraphicsTextItem, QGraphicsPolygonItem, QGraphicsRectItem, QInputDialog
 from PySide6.QtSvgWidgets import QGraphicsSvgItem
 from PySide6.QtGui import QPen, QPainter, QBrush, QColor, QPolygonF, QTransform, QWheelEvent
 from PySide6.QtCore import Qt, QRectF, QPointF, Signal
 from PySide6.QtSvg import QSvgRenderer
 from pathlib import Path
+from typing import Optional
 import math
 
 from core.schematic_model import (
@@ -14,6 +15,7 @@ from core.schematic_model import (
     SchematicPin,
     SchematicWire,
     SchematicJunction,
+    SchematicNetLabel,
 )
 from core.net_extraction import (
     extract_nets_with_intersections,
@@ -74,14 +76,20 @@ class SchematicView(QGraphicsView):
         self._snap_to_grid_enabled = True
         self._show_grid = True  # Show grid background
         
-        # Wire drawing state (for new click-to-place wire mode)
-        self._wire_start_pos: tuple[float, float] | None = None  # (x, y) where wire starts
+        # Wire routing state (2-click orthogonal with auto-turns)
+        self._wire_active: bool = False  # True when actively routing a wire
+        self._wire_fixed: list[tuple[float, float]] = []  # Committed points: start + committed corners
+        self._wire_last_cursor: tuple[float, float] | None = None  # Last cursor position
+        self._wire_last_dir: str | None = None  # "H" or "V" - last movement direction
+        self._wire_preview_items: list[QGraphicsLineItem] = []  # Preview line items
 
         # Map QGraphicsItem (line) -> SchematicWire (for deletion)
         self._wire_items: dict = {}
 
-        # Map QGraphicsItem -> net label text item
+        # Map QGraphicsItem -> net label text item (auto-generated net names/voltages)
         self._net_label_items: dict = {}
+        # Map QGraphicsItem -> SchematicNetLabel (user-placed labels)
+        self._user_label_items: dict = {}
         # Store DC analysis nodal voltages: net_name -> voltage (V)
         self._dc_voltages: dict[str, float] = {}
 
@@ -94,11 +102,9 @@ class SchematicView(QGraphicsView):
         # Model + interaction state - start with empty schematic
         from core.schematic_model import SchematicModel
         self.model: SchematicModel = SchematicModel()  # Start with empty model
-        self._mode: str = "select"      # "select", "wire", "place", or "delete"
+        self._mode: str = "select"      # "select", "wire", "place", "delete", or "net_label"
         self._placement_type: str | None = None  # Component type to place ("R", "C", "OPAMP", "V", "GND")
-        self._pending_pin: SchematicPin | None = None
-        self._pending_wire: SchematicWire | None = None  # For wire-to-wire connections
-        self._pending_junction_pos: tuple[float, float] | None = None  # (x, y) position for junction
+        self._last_net_label_text: str = ""  # Remember last used label name
         
         # Component reference counter for generating unique refs
         self._component_ref_counters = {
@@ -170,9 +176,6 @@ class SchematicView(QGraphicsView):
         self._hovered_component_item = None
         self._hovered_pin = None
 
-        # Preview wire (temporary wire while dragging) - list for Manhattan routing segments
-        self._preview_wire_item = []
-        self._preview_wire_start = None
         
         # Preview component (temporary component while placing)
         self._preview_component_items = []  # List of items to clear
@@ -221,17 +224,28 @@ class SchematicView(QGraphicsView):
         self.setDragMode(QGraphicsView.DragMode.NoDrag)
 
     def set_mode(self, mode: str):
-        """Set the interaction mode: 'select', 'wire', 'place', or 'delete'."""
+        """Set the interaction mode: 'select', 'wire', 'place', 'delete', or 'net_label'."""
         self._mode = mode
         self._placement_type = None
-        self._pending_pin = None
-        self._pending_wire = None
-        self._pending_junction_pos = None
-        self._wire_start_pos = None
+        # Reset wire routing state
+        self._wire_active = False
+        self._wire_fixed = []
+        self._wire_last_cursor = None
+        self._wire_last_dir = None
+        self._clear_wire_preview()
         self._clear_preview_component()
-        # Clear preview wire when switching modes to prevent leftover preview from appearing
-        self._clear_preview_wire(reset_start=True)
         self._update_drag_mode()
+    
+    def _clear_wire_preview(self):
+        """Clear wire preview graphics items."""
+        scene = self.scene()
+        for item in self._wire_preview_items:
+            try:
+                if item.scene() is not None:
+                    scene.removeItem(item)
+            except RuntimeError:
+                pass
+        self._wire_preview_items.clear()
 
     def set_placement_mode(self, component_type: str):
         """Set mode to place a specific component type."""
@@ -307,10 +321,10 @@ class SchematicView(QGraphicsView):
                 new_x, new_y = new_pos
                 # Check if wire start point matches this old pin position
                 if abs(wire.x1 - old_x) < tolerance and abs(wire.y1 - old_y) < tolerance:
-                    wire.x1, wire.y1 = new_x, new_y
+                    self._update_wire_endpoint_manhattan(wire, is_start=True, new_x=new_x, new_y=new_y)
                 # Check if wire end point matches this old pin position
                 if abs(wire.x2 - old_x) < tolerance and abs(wire.y2 - old_y) < tolerance:
-                    wire.x2, wire.y2 = new_x, new_y
+                    self._update_wire_endpoint_manhattan(wire, is_start=False, new_x=new_x, new_y=new_y)
 
     def set_component_values(self, rin=None, r1=None, r2=None):
         """Legacy method for setting component values (for backward compatibility)."""
@@ -322,6 +336,136 @@ class SchematicView(QGraphicsView):
         # This method can be implemented if needed for backward compatibility
         pass
 
+    def _find_near_pin(self, x: float, y: float, tolerance: float = 10.0) -> Optional[SchematicPin]:
+        """Find pin near point (x, y) within tolerance."""
+        for comp in self.model.components:
+            for pin in comp.pins:
+                dist = math.sqrt((pin.x - x)**2 + (pin.y - y)**2)
+                if dist <= tolerance:
+                    return pin
+        return None
+    
+    def _find_near_junction(self, x: float, y: float, tolerance: float = 10.0) -> Optional[SchematicJunction]:
+        """Find junction near point (x, y) within tolerance."""
+        for junction in self.model.junctions:
+            dist = math.sqrt((junction.x - x)**2 + (junction.y - y)**2)
+            if dist <= tolerance:
+                return junction
+        return None
+    
+    def _find_point_on_wire(self, x: float, y: float, tolerance: float = 10.0) -> Optional[tuple[float, float]]:
+        """
+        Find if point (x, y) is on any wire segment within tolerance.
+        Returns the closest point on the wire, or None.
+        """
+        from core.wire_utils import wire_segments, point_to_line_distance
+        
+        best_dist = tolerance
+        best_point = None
+        
+        for wire in self.model.wires:
+            for (x1, y1), (x2, y2) in wire_segments(wire):
+                dist, closest_x, closest_y = point_to_line_distance(x, y, x1, y1, x2, y2)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_point = (closest_x, closest_y)
+        
+        return best_point
+    
+    def _motion_dir(self, prev: tuple[float, float], cur: tuple[float, float]) -> str | None:
+        """
+        Detect cursor movement direction.
+        
+        Returns:
+            "H" for horizontal, "V" for vertical, or None if no significant movement
+        """
+        dx = cur[0] - prev[0]
+        dy = cur[1] - prev[1]
+        if abs(dx) < 1e-6 and abs(dy) < 1e-6:
+            return None
+        return "H" if abs(dx) >= abs(dy) else "V"
+    
+    def _commit_corner_if_dir_change(self, cur: tuple[float, float]) -> None:
+        """
+        Commit a corner when direction changes.
+        Uses _wire_last_cursor, _wire_last_dir, _wire_fixed.
+        When cursor movement direction flips, create a corner at the last cursor position.
+        """
+        if not self._wire_active or self._wire_last_cursor is None:
+            return
+        
+        move_dir = self._motion_dir(self._wire_last_cursor, cur)
+        if move_dir is None:
+            return
+        
+        if self._wire_last_dir is None:
+            self._wire_last_dir = move_dir
+            return
+        
+        if move_dir == self._wire_last_dir:
+            return
+        
+        # Direction changed: commit corner derived from last cursor position and last fixed point
+        last_fixed = self._wire_fixed[-1]
+        lx, ly = last_fixed
+        cx, cy = self._wire_last_cursor
+        
+        if self._wire_last_dir == "H":
+            corner = (cx, ly)
+        else:
+            corner = (lx, cy)
+        
+        # Append only if different
+        if abs(corner[0] - lx) > 1e-6 or abs(corner[1] - ly) > 1e-6:
+            self._wire_fixed.append(corner)
+        
+        self._wire_last_dir = move_dir
+    
+    def _current_preview_points(self, cur: tuple[float, float]) -> list[tuple[float, float]]:
+        """
+        Build current preview polyline (fixed + dynamic).
+        
+        Returns:
+            List of points for the complete preview polyline
+        """
+        pts = self._wire_fixed.copy()
+        if not pts:
+            return pts
+        
+        last = pts[-1]
+        lx, ly = last
+        cx, cy = cur
+        
+        # Make an L from last fixed to cursor according to current direction preference
+        # If last_dir is None, choose by larger delta
+        if self._wire_last_dir is None:
+            pref = "H" if abs(cx - lx) >= abs(cy - ly) else "V"
+        else:
+            pref = self._wire_last_dir
+        
+        if pref == "H":
+            mid = (cx, ly)
+        else:
+            mid = (lx, cy)
+        
+        # Append mid and cur, de-dup
+        for p in (mid, cur):
+            if not pts or (abs(p[0] - pts[-1][0]) > 1e-6 or abs(p[1] - pts[-1][1]) > 1e-6):
+                pts.append(p)
+        
+        # Remove colinear middle points (A-B-C where AB and BC are colinear)
+        cleaned = [pts[0]]
+        for i in range(1, len(pts) - 1):
+            ax, ay = cleaned[-1]
+            bx, by = pts[i]
+            cx2, cy2 = pts[i + 1]
+            if (abs(ax - bx) < 1e-6 and abs(bx - cx2) < 1e-6) or (abs(ay - by) < 1e-6 and abs(by - cy2) < 1e-6):
+                continue
+            cleaned.append((bx, by))
+        if len(pts) > 1:
+            cleaned.append(pts[-1])
+        return cleaned
+    
     def _snap_to_grid(self, x: float, y: float) -> tuple[float, float]:
         """Snap coordinates to grid."""
         if not self._snap_to_grid_enabled:
@@ -399,6 +543,9 @@ class SchematicView(QGraphicsView):
         # Extract nets and add labels
         extract_nets_with_intersections(self.model)
         self._add_net_labels()
+        
+        # Draw user-placed net labels
+        self._draw_user_net_labels()
         
         # Draw selected components with selection highlight
         for ref in self._selected_components:
@@ -1041,6 +1188,81 @@ class SchematicView(QGraphicsView):
         
         return False
 
+    def _update_wire_endpoint_manhattan(self, wire: SchematicWire, is_start: bool, new_x: float, new_y: float):
+        """
+        Update a wire endpoint with Manhattan routing (no diagonals).
+        
+        Args:
+            wire: Wire to update
+            is_start: True to update first point (x1/y1), False to update last point (x2/y2)
+            new_x, new_y: New endpoint position
+        """
+        new_x = float(new_x)
+        new_y = float(new_y)
+        
+        if is_start:
+            # Update first point
+            wire.points[0] = (new_x, new_y)
+            
+            # If wire has more than one point, ensure Manhattan routing to second point
+            if len(wire.points) > 1:
+                second_point = wire.points[1]
+                # Check if segment would be diagonal (both dx and dy are non-zero)
+                dx = abs(second_point[0] - new_x)
+                dy = abs(second_point[1] - new_y)
+                if dx > 1e-6 and dy > 1e-6:
+                    # Diagonal detected - insert Manhattan corner
+                    # Choose corner based on larger delta (horizontal-first if dx >= dy)
+                    if dx >= dy:
+                        # Horizontal first, then vertical
+                        corner = (second_point[0], new_y)
+                    else:
+                        # Vertical first, then horizontal
+                        corner = (new_x, second_point[1])
+                    # Insert corner if different from both points
+                    if (abs(corner[0] - new_x) > 1e-6 or abs(corner[1] - new_y) > 1e-6) and \
+                       (abs(corner[0] - second_point[0]) > 1e-6 or abs(corner[1] - second_point[1]) > 1e-6):
+                        wire.points.insert(1, corner)
+        else:
+            # Update last point
+            wire.points[-1] = (new_x, new_y)
+            
+            # If wire has more than one point, ensure Manhattan routing from second-to-last point
+            if len(wire.points) > 1:
+                second_to_last = wire.points[-2]
+                # Check if segment would be diagonal (both dx and dy are non-zero)
+                dx = abs(new_x - second_to_last[0])
+                dy = abs(new_y - second_to_last[1])
+                if dx > 1e-6 and dy > 1e-6:
+                    # Diagonal detected - insert Manhattan corner
+                    # Choose corner based on larger delta (horizontal-first if dx >= dy)
+                    if dx >= dy:
+                        # Horizontal first, then vertical
+                        corner = (new_x, second_to_last[1])
+                    else:
+                        # Vertical first, then horizontal
+                        corner = (second_to_last[0], new_y)
+                    # Insert corner if different from both points
+                    if (abs(corner[0] - second_to_last[0]) > 1e-6 or abs(corner[1] - second_to_last[1]) > 1e-6) and \
+                       (abs(corner[0] - new_x) > 1e-6 or abs(corner[1] - new_y) > 1e-6):
+                        wire.points.insert(-1, corner)
+        
+        # De-duplicate consecutive identical points
+        deduplicated = [wire.points[0]]
+        for pt in wire.points[1:]:
+            if abs(pt[0] - deduplicated[-1][0]) > 1e-6 or abs(pt[1] - deduplicated[-1][1]) > 1e-6:
+                deduplicated.append(pt)
+        wire.points = deduplicated
+        
+        # Ensure we still have at least 2 points
+        if len(wire.points) < 2:
+            # This shouldn't happen, but if it does, restore a valid wire
+            if len(wire.points) == 1:
+                wire.points = [wire.points[0], wire.points[0]]
+            else:
+                # Emergency fallback - shouldn't happen
+                wire.points = [(0.0, 0.0), (0.0, 0.0)]
+    
     def _update_wires_connected_to_pin(self, old_x: float, old_y: float, new_x: float, new_y: float):
         """Update wires that are connected to a pin that has moved.
         
@@ -1054,12 +1276,10 @@ class SchematicView(QGraphicsView):
         for wire in self.model.wires:
             # Check if wire endpoint 1 matches the old pin position
             if abs(wire.x1 - old_x) < tolerance and abs(wire.y1 - old_y) < tolerance:
-                wire.x1 = new_x
-                wire.y1 = new_y
+                self._update_wire_endpoint_manhattan(wire, is_start=True, new_x=new_x, new_y=new_y)
             # Check if wire endpoint 2 matches the old pin position
             if abs(wire.x2 - old_x) < tolerance and abs(wire.y2 - old_y) < tolerance:
-                wire.x2 = new_x
-                wire.y2 = new_y
+                self._update_wire_endpoint_manhattan(wire, is_start=False, new_x=new_x, new_y=new_y)
 
     def _generate_component_ref(self, component_type: str) -> str:
         """Generate a unique component reference."""
@@ -1926,34 +2146,17 @@ class SchematicView(QGraphicsView):
         self._component_ref_to_graphics[comp.ref] = comp_item
 
     def _draw_wire(self, wire: SchematicWire):
-        """Draw a wire with Manhattan routing (horizontal then vertical)."""
+        """Draw a wire polyline by rendering all segments."""
         scene = self.scene()
         
-        # Calculate Manhattan route: horizontal first, then vertical
-        # Choose the route that minimizes total length
-        dx = abs(wire.x2 - wire.x1)
-        dy = abs(wire.y2 - wire.y1)
-        
-        if dx > dy:
-            # Horizontal first, then vertical
-            mid_x = wire.x2
-            mid_y = wire.y1
-        else:
-            # Vertical first, then horizontal
-            mid_x = wire.x1
-            mid_y = wire.y2
-        
-        # Draw first segment (horizontal or vertical)
-        line1 = QGraphicsLineItem(wire.x1, wire.y1, mid_x, mid_y)
-        line1.setPen(self._pen)
-        scene.addItem(line1)
-        self._wire_items[line1] = wire
-        
-        # Draw second segment
-        line2 = QGraphicsLineItem(mid_x, mid_y, wire.x2, wire.y2)
-        line2.setPen(self._pen)
-        scene.addItem(line2)
-        self._wire_items[line2] = wire
+        # Draw each segment of the polyline
+        for i in range(len(wire.points) - 1):
+            x1, y1 = wire.points[i]
+            x2, y2 = wire.points[i + 1]
+            line = QGraphicsLineItem(x1, y1, x2, y2)
+            line.setPen(self._pen)
+            scene.addItem(line)
+            self._wire_items[line] = wire
 
     def _add_net_labels(self):
         """Add net labels to the schematic."""
@@ -1995,6 +2198,20 @@ class SchematicView(QGraphicsView):
                 label.setPos(x + 5, y - 10)
                 scene.addItem(label)
                 self._net_label_items[label] = net_name
+    
+    def _draw_user_net_labels(self):
+        """Draw user-placed net labels on the schematic."""
+        scene = self.scene()
+        
+        for label in self.model.net_labels:
+            # Create text item for user label
+            label_item = QGraphicsTextItem(label.name)
+            # Position label slightly offset from the placement point
+            label_item.setPos(label.x + 5, label.y - 10)
+            # Use a distinct style for user labels (e.g., blue color)
+            label_item.setDefaultTextColor(QColor(0, 0, 200))  # Blue color
+            scene.addItem(label_item)
+            self._user_label_items[label_item] = label
 
     def _clear_preview_component(self):
         """Clear preview component graphics."""
@@ -2011,28 +2228,6 @@ class SchematicView(QGraphicsView):
                 pass
         self._preview_component_items.clear()
 
-    def _clear_preview_wire(self, reset_start=False):
-        """Clear preview wire graphics and optionally reset wire start position.
-        
-        Args:
-            reset_start: If True, also reset _preview_wire_start to None.
-                        If False, only clear the graphics items (for use during mouse move).
-        """
-        scene = self.scene()
-        # Clear preview wire items
-        if self._preview_wire_item:
-            for item in self._preview_wire_item:
-                try:
-                    # Check if item still exists by accessing its scene
-                    if item.scene() is not None:
-                        scene.removeItem(item)
-                except RuntimeError:
-                    # Item already deleted, skip it
-                    pass
-            self._preview_wire_item.clear()
-        # Reset wire start position only if requested
-        if reset_start:
-            self._preview_wire_start = None
 
     def _update_preview_component(self, x: float, y: float):
         """Update preview component at position (x, y)."""
@@ -2322,87 +2517,59 @@ class SchematicView(QGraphicsView):
             return
         
         elif self._mode == "wire":
+            # 2-click orthogonal wire routing with auto-turns
             if event.button() == Qt.MouseButton.LeftButton:
-                # Find nearest pin or wire
-                nearest_pin = None
-                min_dist = float('inf')
-                for comp in self.model.components:
-                    for pin in comp.pins:
-                        dist = ((pin.x - x)**2 + (pin.y - y)**2)**0.5
-                        if dist < min_dist and dist < 10.0:  # 10 pixel tolerance
-                            min_dist = dist
-                            nearest_pin = pin
+                # Snap to grid
+                snapped_x, snapped_y = self._snap_to_grid(x, y)
                 
-                if nearest_pin:
-                    if self._pending_pin is None:
-                        # Start wire from pin
-                        self._pending_pin = nearest_pin
-                        self._preview_wire_start = (nearest_pin.x, nearest_pin.y)
-                    else:
-                        # Complete wire to pin
-                        if self._pending_pin != nearest_pin:
-                            wire = SchematicWire(
-                                x1=self._pending_pin.x,
-                                y1=self._pending_pin.y,
-                                x2=nearest_pin.x,
-                                y2=nearest_pin.y,
-                                net="",  # Will be assigned by net extraction
-                            )
-                            self.model.wires.append(wire)
-                            self._redraw_from_model()
-                        self._pending_pin = None
-                        self._preview_wire_start = None
-                        self._clear_preview_wire()
+                # Check for nearby pin, junction, or wire
+                near_pin = self._find_near_pin(snapped_x, snapped_y, tolerance=10.0)
+                near_junction = self._find_near_junction(snapped_x, snapped_y, tolerance=10.0)
+                wire_point = self._find_point_on_wire(snapped_x, snapped_y, tolerance=10.0)
+                
+                # Use pin/junction/wire position if found, otherwise use snapped position
+                if near_pin:
+                    final_x, final_y = near_pin.x, near_pin.y
+                elif near_junction:
+                    final_x, final_y = near_junction.x, near_junction.y
+                elif wire_point:
+                    final_x, final_y = wire_point
                 else:
-                    # No pin clicked - check if we should start wire from empty space or connect to wire
-                    if self._preview_wire_start is None:
-                        # First click on empty space - start wire from this position
-                        snapped_x, snapped_y = self._snap_to_grid(x, y)
-                        self._preview_wire_start = (snapped_x, snapped_y)
-                    else:
-                        # Second click - check for wire-to-wire connection or complete wire
-                        nearest_wire = find_nearest_wire(self.model.wires, x, y)
-                        if nearest_wire and self._pending_pin:
-                            # Connect from pending pin to existing wire via junction
-                            junction = SchematicJunction(x=x, y=y)
-                            self.model.junctions.append(junction)
-                            # Create wire from pending pin to junction
-                            wire1 = SchematicWire(
-                                x1=self._pending_pin.x,
-                                y1=self._pending_pin.y,
-                                x2=x,
-                                y2=y,
-                                net="",  # Will be assigned by net extraction
-                            )
-                            self.model.wires.append(wire1)
-                            # Create wire from junction to nearest wire
-                            wire2 = SchematicWire(
-                                x1=x,
-                                y1=y,
-                                x2=nearest_wire.x2,
-                                y2=nearest_wire.y2,
-                                net="",  # Will be assigned by net extraction
-                            )
-                            self.model.wires.append(wire2)
-                            self._redraw_from_model()
-                            self._pending_pin = None
-                            self._preview_wire_start = None
-                            self._clear_preview_wire()
-                        elif self._preview_wire_start:
-                            # Complete wire from start position to current position
-                            start_x, start_y = self._preview_wire_start
-                            snapped_x, snapped_y = self._snap_to_grid(x, y)
-                            wire = SchematicWire(
-                                x1=start_x,
-                                y1=start_y,
-                                x2=snapped_x,
-                                y2=snapped_y,
-                                net="",  # Will be assigned by net extraction
-                            )
-                            self.model.wires.append(wire)
-                            self._redraw_from_model()
-                            self._preview_wire_start = None
-                            self._clear_preview_wire()
+                    final_x, final_y = snapped_x, snapped_y
+                
+                if not self._wire_active:
+                    # First click: start wire run
+                    self._wire_active = True
+                    self._wire_fixed = [(final_x, final_y)]
+                    self._wire_last_cursor = (final_x, final_y)
+                    self._wire_last_dir = None
+                    self._clear_wire_preview()
+                    return
+                else:
+                    # Second click: finalize and stop
+                    cur = (final_x, final_y)
+                    # Before finalize, commit corner if direction changed since last move
+                    self._commit_corner_if_dir_change(cur)
+                    pts = self._current_preview_points(cur)
+                    
+                    if len(pts) >= 2:
+                        self.model.wires.append(SchematicWire(points=pts, net=""))
+                        # If end point is not on pin/junction/wire: create junction
+                        if not near_pin and not near_junction and not wire_point:
+                            self.model.junctions.append(SchematicJunction(x=pts[-1][0], y=pts[-1][1]))
+                        
+                        # Re-run net extraction and redraw
+                        from core.net_extraction import extract_nets_with_intersections
+                        extract_nets_with_intersections(self.model)
+                        self._redraw_from_model()
+                    
+                    # Stop wire
+                    self._wire_active = False
+                    self._wire_fixed = []
+                    self._wire_last_cursor = None
+                    self._wire_last_dir = None
+                    self._clear_wire_preview()
+                    return
             return
         
         elif self._mode == "delete":
@@ -2449,6 +2616,43 @@ class SchematicView(QGraphicsView):
                 
                 if clicked_component:
                     self.model.components.remove(clicked_component)
+                    self._redraw_from_model()
+            return
+        
+        elif self._mode == "net_label":
+            if event.button() == Qt.MouseButton.LeftButton:
+                # Determine placement point: snap to nearest wire if close, else snap to grid
+                placement_x, placement_y = x, y
+                
+                # Check if near a wire
+                nearest_wire, closest_x, closest_y = find_nearest_wire(self.model.wires, x, y, max_dist=15.0)
+                if nearest_wire:
+                    # Snap to nearest point on wire
+                    placement_x, placement_y = closest_x, closest_y
+                else:
+                    # Snap to grid if enabled
+                    placement_x, placement_y = self._snap_to_grid(x, y)
+                
+                # Prompt for label name
+                label_text, ok = QInputDialog.getText(
+                    self,
+                    "Net Label",
+                    "Enter net label name:",
+                    text=self._last_net_label_text
+                )
+                
+                if ok and label_text and label_text.strip():
+                    # Create net label
+                    label = SchematicNetLabel(
+                        x=placement_x,
+                        y=placement_y,
+                        name=label_text.strip()
+                    )
+                    self.model.net_labels.append(label)
+                    self._last_net_label_text = label_text.strip()
+                    
+                    # Re-run net extraction and redraw
+                    extract_nets_with_intersections(self.model)
                     self._redraw_from_model()
             return
 
@@ -2527,6 +2731,20 @@ class SchematicView(QGraphicsView):
         
         # Fallback: only if some future mode needs default behavior
         super().mousePressEvent(event)
+    
+    def keyPressEvent(self, event):
+        """Handle key press events."""
+        if self._mode == "wire" and self._wire_active:
+            if event.key() == Qt.Key.Key_Escape:
+                # Cancel wire drawing
+                self._wire_active = False
+                self._wire_fixed = []
+                self._wire_last_cursor = None
+                self._wire_last_dir = None
+                self._clear_wire_preview()
+                return
+        
+        super().keyPressEvent(event)
 
     def mouseMoveEvent(self, event):
         """Handle mouse move events."""
@@ -2538,45 +2756,47 @@ class SchematicView(QGraphicsView):
             return  # Do NOT call super() - we've fully handled the event
         
         elif self._mode == "wire":
-            if self._preview_wire_start:
+            if self._wire_active:
                 scene = self.scene()
-                # Clear previous preview wire segments - only clear graphics, don't reset start position
-                if self._preview_wire_item:
-                    for item in self._preview_wire_item:
-                        try:
-                            if item.scene() is not None:
-                                scene.removeItem(item)
-                        except RuntimeError:
-                            # Item already deleted, skip it
-                            pass
-                    self._preview_wire_item.clear()
+                # Clear previous preview
+                self._clear_wire_preview()
                 
-                # Calculate Manhattan route for preview
-                start_x, start_y = self._preview_wire_start
-                dx = abs(x - start_x)
-                dy = abs(y - start_y)
+                # Snap cursor to grid
+                snapped_x, snapped_y = self._snap_to_grid(x, y)
                 
-                if dx > dy:
-                    # Horizontal first, then vertical
-                    mid_x = x
-                    mid_y = start_y
+                # Check for nearby pin/junction/wire
+                near_pin = self._find_near_pin(snapped_x, snapped_y, tolerance=10.0)
+                near_junction = self._find_near_junction(snapped_x, snapped_y, tolerance=10.0)
+                wire_point = self._find_point_on_wire(snapped_x, snapped_y, tolerance=10.0)
+                
+                if near_pin:
+                    cursor_x, cursor_y = near_pin.x, near_pin.y
+                elif near_junction:
+                    cursor_x, cursor_y = near_junction.x, near_junction.y
+                elif wire_point:
+                    cursor_x, cursor_y = wire_point
                 else:
-                    # Vertical first, then horizontal
-                    mid_x = start_x
-                    mid_y = y
+                    cursor_x, cursor_y = snapped_x, snapped_y
                 
-                # Draw Manhattan route with two segments
-                # Draw first segment
-                line1 = QGraphicsLineItem(start_x, start_y, mid_x, mid_y)
-                line1.setPen(self._preview_pen)
-                scene.addItem(line1)
-                self._preview_wire_item.append(line1)
+                cur = (cursor_x, cursor_y)
                 
-                # Draw second segment
-                line2 = QGraphicsLineItem(mid_x, mid_y, x, y)
-                line2.setPen(self._preview_pen)
-                scene.addItem(line2)
-                self._preview_wire_item.append(line2)
+                # Commit corner if direction changed
+                self._commit_corner_if_dir_change(cur)
+                
+                # Build preview polyline
+                pts = self._current_preview_points(cur)
+                
+                # Render preview as separate line items between consecutive points
+                for i in range(len(pts) - 1):
+                    x1, y1 = pts[i]
+                    x2, y2 = pts[i + 1]
+                    line = QGraphicsLineItem(x1, y1, x2, y2)
+                    line.setPen(self._preview_pen)
+                    scene.addItem(line)
+                    self._wire_preview_items.append(line)
+                
+                # Update last cursor position
+                self._wire_last_cursor = cur
             return  # Do NOT call super() - we've fully handled the event
         
         elif self._mode == "select":

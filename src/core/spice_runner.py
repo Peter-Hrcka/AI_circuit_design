@@ -8,6 +8,8 @@ This version:
 """
 
 from __future__ import annotations
+
+from .net_extraction import normalize_net_name
 from typing import Dict
 
 import math
@@ -31,7 +33,7 @@ class SpiceError(RuntimeError):
     pass
 
 
-def run_spice_ac_gain(netlist: str) -> Dict[str, float]:
+def run_spice_ac_gain(netlist: str, pspice_compat: bool = False) -> Dict[str, float]:
     """
     Run ngspice on the given netlist (AC analysis with
     `.print ac vm(Vout) vm(Vin)`) and return a dict with the
@@ -40,6 +42,9 @@ def run_spice_ac_gain(netlist: str) -> Dict[str, float]:
     Assumes:
     - The AC source at Vin has magnitude 1 V (as in build_non_inverting_ac_netlist),
       so |Vout| = linear gain.
+    
+    Args:
+        pspice_compat: If True, creates spinit file to enable ngspice PSpice compatibility mode
     """
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir_path = Path(tmpdir)
@@ -48,11 +53,19 @@ def run_spice_ac_gain(netlist: str) -> Dict[str, float]:
 
         # 1) Write the netlist
         netlist_path.write_text(netlist, encoding="utf-8")
+        
+        # 2) Create spinit file if PSpice compatibility is enabled
+        if pspice_compat:
+            spinit_path = tmpdir_path / "spinit"
+            spinit_content = "set ngbehavior=psa\nset numdgt=6\n"
+            spinit_path.write_text(spinit_content, encoding="utf-8")
 
-        # 2) Call ngspice in batch mode
+        # 3) Call ngspice in batch mode
+        # Use cwd=tmpdir_path so ngspice can find the spinit file
         try:
             result = subprocess.run(
-                [NGSPICE_EXECUTABLE, "-b", "-o", str(log_path), str(netlist_path)],
+                [NGSPICE_EXECUTABLE, "-b", "-o", log_path.name, netlist_path.name],
+                cwd=str(tmpdir_path),
                 capture_output=True,
                 text=True,
                 check=False,
@@ -132,7 +145,7 @@ def run_spice_ac_gain(netlist: str) -> Dict[str, float]:
             "vm_vin": vm_vin if vm_vin is not None else 0.0,
         }
 
-def run_spice_ac_sweep(netlist: str) -> Dict[str, list]:
+def run_spice_ac_sweep(netlist: str, pspice_compat: bool = False) -> Dict[str, list]:
     """
     Run ngspice on an AC sweep netlist (multiple frequency points).
 
@@ -143,6 +156,9 @@ def run_spice_ac_sweep(netlist: str) -> Dict[str, list]:
             "vm_vin": [...],   # may be all 1.0 if not printed
             "gain_db": [...],
         }
+    
+    Args:
+        pspice_compat: If True, creates spinit file to enable ngspice PSpice compatibility mode
     """
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir_path = Path(tmpdir)
@@ -150,10 +166,17 @@ def run_spice_ac_sweep(netlist: str) -> Dict[str, list]:
         log_path = tmpdir_path / "ac_sweep.log"
 
         netlist_path.write_text(netlist, encoding="utf-8")
+        
+        # Create spinit file if PSpice compatibility is enabled
+        if pspice_compat:
+            spinit_path = tmpdir_path / "spinit"
+            spinit_content = "set ngbehavior=psa\nset numdgt=6\n"
+            spinit_path.write_text(spinit_content, encoding="utf-8")
 
         try:
             result = subprocess.run(
-                [NGSPICE_EXECUTABLE, "-b", "-o", str(log_path), str(netlist_path)],
+                [NGSPICE_EXECUTABLE, "-b", "-o", log_path.name, netlist_path.name],
+                cwd=str(tmpdir_path),
                 capture_output=True,
                 text=True,
             )
@@ -300,7 +323,7 @@ def run_spice_ac_sweep(netlist: str) -> Dict[str, list]:
             "gain_db": gain_db,
         }
 
-def run_spice_noise_sweep(netlist: str) -> Dict[str, float]:
+def run_spice_noise_sweep(netlist: str, pspice_compat: bool = False) -> Dict[str, float]:
     """
     Run ngspice on a noise netlist that contains a .control block:
 
@@ -316,6 +339,9 @@ def run_spice_noise_sweep(netlist: str) -> Dict[str, float]:
             "total_onoise_rms": float,   # output noise over band
             "total_inoise_rms": float,   # input-referred noise over band
         }
+    
+    Args:
+        pspice_compat: If True, creates spinit file to enable ngspice PSpice compatibility mode
     """
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir_path = Path(tmpdir)
@@ -323,10 +349,17 @@ def run_spice_noise_sweep(netlist: str) -> Dict[str, float]:
         log_path = tmpdir_path / "noise.log"
 
         netlist_path.write_text(netlist, encoding="utf-8")
+        
+        # Create spinit file if PSpice compatibility is enabled
+        if pspice_compat:
+            spinit_path = tmpdir_path / "spinit"
+            spinit_content = "set ngbehavior=psa\nset numdgt=6\n"
+            spinit_path.write_text(spinit_content, encoding="utf-8")
 
         try:
             result = subprocess.run(
-                [NGSPICE_EXECUTABLE, "-b", "-o", str(log_path), str(netlist_path)],
+                [NGSPICE_EXECUTABLE, "-b", "-o", log_path.name, netlist_path.name],
+                cwd=str(tmpdir_path),
                 capture_output=True,
                 text=True,
             )
@@ -385,13 +418,16 @@ def run_spice_noise_sweep(netlist: str) -> Dict[str, float]:
         }
 
 
-def run_spice_dc_analysis(netlist: str) -> Dict[str, float]:
+def run_spice_dc_analysis(netlist: str, pspice_compat: bool = False) -> Dict[str, float]:
     """
     Run ngspice DC operating point analysis (.op) and return nodal voltages.
     
     Returns:
         Dictionary mapping node names to DC voltages (in volts).
         Example: {"0": 0.0, "Vin": 5.0, "Vout": 2.5, ...}
+    
+    Args:
+        pspice_compat: If True, creates spinit file to enable ngspice PSpice compatibility mode
     """
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir_path = Path(tmpdir)
@@ -401,10 +437,18 @@ def run_spice_dc_analysis(netlist: str) -> Dict[str, float]:
         # Write the netlist
         netlist_path.write_text(netlist, encoding="utf-8")
         
+        # Create spinit file if PSpice compatibility is enabled
+        if pspice_compat:
+            spinit_path = tmpdir_path / "spinit"
+            spinit_content = "set ngbehavior=psa\nset numdgt=6\n"
+            spinit_path.write_text(spinit_content, encoding="utf-8")
+        
         # Call ngspice in batch mode
+        # Use cwd=tmpdir_path so ngspice can find the spinit file
         try:
             result = subprocess.run(
-                [NGSPICE_EXECUTABLE, "-b", "-o", str(log_path), str(netlist_path)],
+                [NGSPICE_EXECUTABLE, "-b", "-o", log_path.name, netlist_path.name],
+                cwd=str(tmpdir_path),
                 capture_output=True,
                 text=True,
                 check=False,
@@ -504,7 +548,9 @@ def run_spice_dc_analysis(netlist: str) -> Dict[str, float]:
                                 is_parameter = True
                             
                             if not is_parameter:
-                                nodal_voltages[node_name] = voltage
+                                # Normalize node name to canonical form
+                                normalized_node = normalize_net_name(node_name)
+                                nodal_voltages[normalized_node] = voltage
                     except ValueError:
                         # Not a valid voltage line, might be end of table
                         pass

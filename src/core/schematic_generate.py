@@ -50,8 +50,8 @@ def non_inverting_circuit_to_schematic(circuit: Circuit) -> SchematicModel:
         )
     )
     # Wire segments for Rin (just two straight pieces)
-    model.wires.append(SchematicWire(x1=vin_x, y1=vin_y, x2=-105.0, y2=plus_y, net="Vin"))
-    model.wires.append(SchematicWire(x1=-55.0, y1=plus_y, x2=plus_x, y2=plus_y, net="Vplus"))
+    model.wires.append(SchematicWire(points=[(vin_x, vin_y), (-105.0, plus_y)], net="Vin"))
+    model.wires.append(SchematicWire(points=[(-55.0, plus_y), (plus_x, plus_y)], net="Vplus"))
 
     # --- R1: feedback from Vout to Vminus -----------------------------------
     r1_y = -40.0
@@ -73,10 +73,10 @@ def non_inverting_circuit_to_schematic(circuit: Circuit) -> SchematicModel:
         )
     )
     # Wire from minus node up to R1, then over to out_x, then down to output node
-    model.wires.append(SchematicWire(x1=minus_x, y1=minus_y, x2=minus_x, y2=r1_y, net="Vminus"))
-    model.wires.append(SchematicWire(x1=minus_x, y1=r1_y, x2=40.0, y2=r1_y, net="Vminus"))
-    model.wires.append(SchematicWire(x1=120.0, y1=r1_y, x2=out_x, y2=r1_y, net="Vout"))
-    model.wires.append(SchematicWire(x1=out_x, y1=r1_y, x2=out_x, y2=out_y, net="Vout"))
+    model.wires.append(SchematicWire(points=[(minus_x, minus_y), (minus_x, r1_y)], net="Vminus"))
+    model.wires.append(SchematicWire(points=[(minus_x, r1_y), (40.0, r1_y)], net="Vminus"))
+    model.wires.append(SchematicWire(points=[(120.0, r1_y), (out_x, r1_y)], net="Vout"))
+    model.wires.append(SchematicWire(points=[(out_x, r1_y), (out_x, out_y)], net="Vout"))
 
     # --- R2: from Vminus to ground -----------------------------------------
     r2_center_y = 110.0
@@ -97,8 +97,8 @@ def non_inverting_circuit_to_schematic(circuit: Circuit) -> SchematicModel:
         )
     )
     # Wire from minus down to top of R2, and from R2 bottom to ground node
-    model.wires.append(SchematicWire(x1=minus_x, y1=minus_y, x2=minus_x, y2=85.0, net="Vminus"))
-    model.wires.append(SchematicWire(x1=minus_x, y1=135.0, x2=minus_x, y2=160.0, net="0"))
+    model.wires.append(SchematicWire(points=[(minus_x, minus_y), (minus_x, 85.0)], net="Vminus"))
+    model.wires.append(SchematicWire(points=[(minus_x, 135.0), (minus_x, 160.0)], net="0"))
 
     # --- Op-amp block -------------------------------------------------------
     # We'll keep OPAMP fairly abstract for now; pins at the known locations.
