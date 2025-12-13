@@ -62,6 +62,12 @@ SUBCKT_RE = re.compile(
     re.IGNORECASE,
 )
 
+# .MODEL line to extract model names
+MODEL_RE = re.compile(
+    r"^\s*\.MODEL\s+([A-Za-z0-9_]+)",
+    re.IGNORECASE,
+)
+
 # Vendor hints inside comments
 TI_HINT_RE = re.compile(r"texas instruments|ti\s+opamp", re.IGNORECASE)
 ADI_HINT_RE = re.compile(r"analog devices|adi\s+opamp", re.IGNORECASE)
@@ -140,18 +146,40 @@ def _guess_vendor(text: str) -> Optional[str]:
 
 def _extract_model_names(text: str) -> list[str]:
     """
-    Extract .SUBCKT names from the model file.
+    Extract model names from both .SUBCKT and .MODEL statements in the model file.
 
-    Example line:
+    Returns a merged unique list with .SUBCKT names first (in file order),
+    followed by .MODEL names (in file order) that aren't duplicates.
+
+    Example lines:
         .SUBCKT OP284 1 2 3 4
         .subckt TL072 IN+ IN- V+ V-
+        .MODEL NMOS_MODEL NMOS (VTO=0.5)
+        .model PMOS_MODEL PMOS
     """
-    names: list[str] = []
+    subckt_names: list[str] = []
+    model_names: list[str] = []
+    seen: set[str] = set()
+    
     for line in text.splitlines():
+        # Extract .SUBCKT names first
         m = SUBCKT_RE.match(line)
         if m:
-            names.append(m.group(1))
-    return names
+            name = m.group(1)
+            if name not in seen:
+                subckt_names.append(name)
+                seen.add(name)
+        
+        # Extract .MODEL names
+        m = MODEL_RE.match(line)
+        if m:
+            name = m.group(1)
+            if name not in seen:
+                model_names.append(name)
+                seen.add(name)
+    
+    # Return .SUBCKT names first, then .MODEL names
+    return subckt_names + model_names
 
 
 def _classify_from_flags(

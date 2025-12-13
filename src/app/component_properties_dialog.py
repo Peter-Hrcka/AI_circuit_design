@@ -21,9 +21,11 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFormLayout,
     QDialogButtonBox,
+    QMessageBox,
 )
 
 from core.schematic_model import SchematicComponent
+from core.model_analyzer import analyze_model
 
 
 class ComponentPropertiesDialog(QDialog):
@@ -155,20 +157,16 @@ class ComponentPropertiesDialog(QDialog):
         form_layout.addRow("Model File:", model_layout)
         self.form_widgets["model_file"] = model_path_edit
         
-        # Supply rails
-        vcc_spin = QDoubleSpinBox()
-        vcc_spin.setRange(-1000.0, 1000.0)
-        vcc_spin.setDecimals(2)
-        vcc_spin.setSuffix(" V")
-        form_layout.addRow("VCC (Positive Supply):", vcc_spin)
-        self.form_widgets["vcc"] = vcc_spin
+        # Subckt name
+        subckt_layout = QHBoxLayout()
+        subckt_edit = QLineEdit()
+        auto_detect_btn = QPushButton("Auto-detect")
+        auto_detect_btn.clicked.connect(lambda: self._auto_detect_opamp_subckt(model_path_edit, subckt_edit))
         
-        vee_spin = QDoubleSpinBox()
-        vee_spin.setRange(-1000.0, 1000.0)
-        vee_spin.setDecimals(2)
-        vee_spin.setSuffix(" V")
-        form_layout.addRow("VEE (Negative Supply):", vee_spin)
-        self.form_widgets["vee"] = vee_spin
+        subckt_layout.addWidget(subckt_edit)
+        subckt_layout.addWidget(auto_detect_btn)
+        form_layout.addRow("Subckt name:", subckt_layout)
+        self.form_widgets["subckt_name"] = subckt_edit
         
         group = QGroupBox("Op-Amp Properties")
         group.setLayout(form_layout)
@@ -281,10 +279,32 @@ class ComponentPropertiesDialog(QDialog):
         form_layout.addRow("Type:", mos_type_combo)
         self.form_widgets["mos_type"] = mos_type_combo
         
+        # Model file
+        model_file_layout = QHBoxLayout()
+        model_file_edit = QLineEdit()
+        model_file_edit.setReadOnly(True)
+        browse_btn = QPushButton("Browse...")
+        browse_btn.clicked.connect(lambda: self._browse_mosfet_model_file(model_file_edit))
+        
+        clear_btn = QPushButton("Clear")
+        clear_btn.clicked.connect(lambda: model_file_edit.clear())
+        
+        model_file_layout.addWidget(model_file_edit)
+        model_file_layout.addWidget(browse_btn)
+        model_file_layout.addWidget(clear_btn)
+        form_layout.addRow("Model File:", model_file_layout)
+        self.form_widgets["model_file"] = model_file_edit
+        
         # Model name
+        model_layout = QHBoxLayout()
         model_edit = QLineEdit()
         model_edit.setText(str(self.component.extra.get("model", "")))
-        form_layout.addRow("SPICE Model:", model_edit)
+        auto_detect_btn = QPushButton("Auto-detect")
+        auto_detect_btn.clicked.connect(lambda: self._auto_detect_mosfet_model(model_file_edit, model_edit))
+        
+        model_layout.addWidget(model_edit)
+        model_layout.addWidget(auto_detect_btn)
+        form_layout.addRow("SPICE Model:", model_layout)
         self.form_widgets["model"] = model_edit
         
         group = QGroupBox("MOSFET Properties")
@@ -329,10 +349,77 @@ class ComponentPropertiesDialog(QDialog):
             self,
             "Select Op-Amp Model File",
             "",
-            "SPICE Models (*.lib *.cir *.sub *.model);;All Files (*.*)"
+            "SPICE Models (*.lib *.cir *.sub *.sp *.spi *.model);;All Files (*.*)"
         )
         if file_path:
             path_edit.setText(file_path)
+    
+    def _browse_mosfet_model_file(self, path_edit: QLineEdit):
+        """Open file dialog to select MOSFET model file."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select MOSFET Model File",
+            "",
+            "SPICE Models (*.lib *.cir *.sub *.sp *.spi *.model);;All Files (*.*)"
+        )
+        if file_path:
+            path_edit.setText(file_path)
+    
+    def _auto_detect_opamp_subckt(self, model_file_edit: QLineEdit, subckt_edit: QLineEdit):
+        """Auto-detect subckt name from model file."""
+        model_file = model_file_edit.text().strip()
+        if not model_file:
+            QMessageBox.warning(
+                self,
+                "No Model File",
+                "Please select a model file first."
+            )
+            return
+        
+        try:
+            meta = analyze_model(model_file)
+            if meta.model_names:
+                subckt_edit.setText(meta.model_names[0])
+            else:
+                QMessageBox.information(
+                    self,
+                    "No Subckt Found",
+                    "No subckt names were found in the model file."
+                )
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Error",
+                f"Failed to analyze model file:\n{str(e)}"
+            )
+    
+    def _auto_detect_mosfet_model(self, model_file_edit: QLineEdit, model_edit: QLineEdit):
+        """Auto-detect model name from model file."""
+        model_file = model_file_edit.text().strip()
+        if not model_file:
+            QMessageBox.warning(
+                self,
+                "No Model File",
+                "Please select a model file first."
+            )
+            return
+        
+        try:
+            meta = analyze_model(model_file)
+            if meta.model_names:
+                model_edit.setText(meta.model_names[0])
+            else:
+                QMessageBox.information(
+                    self,
+                    "No Model Found",
+                    "No model names were found in the model file."
+                )
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Error",
+                f"Failed to analyze model file:\n{str(e)}"
+            )
     
     def _load_current_values(self):
         """Load current component values into form widgets."""
@@ -349,14 +436,8 @@ class ComponentPropertiesDialog(QDialog):
             # Load op-amp properties
             if "model_file" in extra:
                 self.form_widgets["model_file"].setText(str(extra["model_file"]))
-            if "vcc" in extra:
-                self.form_widgets["vcc"].setValue(float(extra["vcc"]))
-            else:
-                self.form_widgets["vcc"].setValue(15.0)  # Default
-            if "vee" in extra:
-                self.form_widgets["vee"].setValue(float(extra["vee"]))
-            else:
-                self.form_widgets["vee"].setValue(-15.0)  # Default
+            if "subckt_name" in extra:
+                self.form_widgets["subckt_name"].setText(str(extra["subckt_name"]))
         
         elif self.component.ctype == "V":
             # Load voltage source properties
@@ -381,12 +462,14 @@ class ComponentPropertiesDialog(QDialog):
             if "model" in self.form_widgets and "model" in extra:
                 self.form_widgets["model"].setText(str(extra["model"]))
         
-        elif self.component.ctype == "M":
+        elif self.component.ctype == "M" or self.component.ctype == "M_bulk":
             # Load MOSFET properties
             if "mos_type" in self.form_widgets:
                 mos_type = str(extra.get("mos_type", "NMOS")).upper()
                 if mos_type in ("NMOS", "PMOS"):
                     self.form_widgets["mos_type"].setCurrentText(mos_type)
+            if "model_file" in extra:
+                self.form_widgets["model_file"].setText(str(extra["model_file"]))
             if "model" in self.form_widgets and "model" in extra:
                 self.form_widgets["model"].setText(str(extra["model"]))
     
@@ -406,8 +489,8 @@ class ComponentPropertiesDialog(QDialog):
             model_file = self.form_widgets["model_file"].text().strip()
             # Always include model_file (even if empty) so we can clear it
             self.result_properties["model_file"] = model_file if model_file else None
-            self.result_properties["vcc"] = self.form_widgets["vcc"].value()
-            self.result_properties["vee"] = self.form_widgets["vee"].value()
+            subckt_name = self.form_widgets["subckt_name"].text().strip()
+            self.result_properties["subckt_name"] = subckt_name if subckt_name else None
         
         elif self.component.ctype == "V":
             # Collect voltage source properties
@@ -449,6 +532,8 @@ class ComponentPropertiesDialog(QDialog):
             # Collect MOSFET properties
             if "mos_type" in self.form_widgets:
                 self.result_properties["mos_type"] = self.form_widgets["mos_type"].currentText()
+            model_file = self.form_widgets["model_file"].text().strip()
+            self.result_properties["model_file"] = model_file if model_file else None
             if "model" in self.form_widgets:
                 model_name = self.form_widgets["model"].text().strip()
                 if model_name:

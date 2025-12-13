@@ -7,7 +7,7 @@ For now:
 """
 
 from __future__ import annotations
-from typing import List, Dict
+from typing import List, Dict, Set
 
 from .circuit import Circuit, Component
 from .model_metadata import ModelMetadata  # add this import at the top
@@ -51,6 +51,49 @@ def _emit_opamp_block(lines: List[str], circuit: Circuit) -> None:
         lines.append("RPOLE Vout 0 1k")
         lines.append("CPOLE Vout 0 7.9u")
 
+
+
+def _collect_model_files(circuit: Circuit) -> Set[str]:
+    """
+    Collect all unique model file paths from components that may use external model files.
+    
+    Returns:
+        Set of model file paths (strings) that need to be included in the netlist.
+    """
+    model_files: Set[str] = set()
+    
+    for comp in circuit.components:
+        # OPAMP components
+        if comp.ctype == "OPAMP" or comp.ctype == "OPAMP_ideal":
+            model_file = comp.extra.get("model_file")
+            if model_file:
+                model_files.add(model_file)
+        
+        # MOSFET components
+        elif comp.ctype == "M" or comp.ctype == "M_bulk":
+            model_file = comp.extra.get("model_file")
+            if model_file:
+                model_files.add(model_file)
+        
+        # BJT components
+        elif comp.ctype == "Q":
+            model_file = comp.extra.get("model_file")
+            if model_file:
+                model_files.add(model_file)
+        
+        # Diode components
+        elif comp.ctype == "D":
+            model_file = comp.extra.get("model_file")
+            if model_file:
+                model_files.add(model_file)
+    
+    # Also check circuit metadata for backward compatibility
+    if "opamp_model_file" in circuit.metadata:
+        model_file = circuit.metadata.get("opamp_model_file")
+        if model_file:
+            model_files.add(model_file)
+    
+    return model_files
 
 
 def attach_vendor_opamp_model(
@@ -164,6 +207,13 @@ def circuit_to_spice_netlist(circuit: Circuit) -> str:
     lines: List[str] = [f"* Netlist for circuit: {circuit.name}"]
     lines.append("")
 
+    # Collect and emit model file includes
+    model_files = _collect_model_files(circuit)
+    if model_files:
+        for model_file in sorted(model_files):  # Sort for consistent output
+            lines.append(f'.include "{model_file}"')
+        lines.append("")
+
     # Process components
     opamps: List[Component] = []
     diodes: List[Component] = []
@@ -210,10 +260,14 @@ def circuit_to_spice_netlist(circuit: Circuit) -> str:
             if not gate_node:
                 raise ValueError(f"MOSFET {comp.ref} missing gate_node in extra dict")
             model_name = comp.extra.get("model")
+            model_file = comp.extra.get("model_file")
             if not model_name:
                 # Use default model based on type
                 mos_type = comp.extra.get("mos_type", "NMOS")
                 model_name = "NMOS_DEFAULT" if str(mos_type).upper() == "NMOS" else "PMOS_DEFAULT"
+                # Warn if model_file is present but model name is missing
+                if model_file:
+                    lines.append(f"* WARNING: {comp.ref} has model_file but no model name")
             lines.append(f"{comp.ref} {comp.node1} {gate_node} {comp.node2} {bulk_node} {model_name}")
         elif comp.ctype == "M_bulk":
             # 4-terminal MOSFET: M<ref> drain gate source bulk model_name
@@ -223,10 +277,14 @@ def circuit_to_spice_netlist(circuit: Circuit) -> str:
             if not gate_node:
                 raise ValueError(f"MOSFET {comp.ref} missing gate_node in extra dict")
             model_name = comp.extra.get("model")
+            model_file = comp.extra.get("model_file")
             if not model_name:
                 # Use default model based on type
                 mos_type = comp.extra.get("mos_type", "NMOS")
                 model_name = "NMOS_DEFAULT" if str(mos_type).upper() == "NMOS" else "PMOS_DEFAULT"
+                # Warn if model_file is present but model name is missing
+                if model_file:
+                    lines.append(f"* WARNING: {comp.ref} has model_file but no model name")
             lines.append(f"{comp.ref} {comp.node1} {gate_node} {comp.node2} {bulk_node} {model_name}")
         
         elif comp.ctype == "V":
@@ -259,6 +317,7 @@ def circuit_to_spice_netlist(circuit: Circuit) -> str:
             lines.append(f"* {comp.ref} type {comp.ctype} not yet implemented")
     
     # Handle op-amps (emit op-amp blocks)
+    # Note: model files are already collected and emitted above
     for opamp in opamps:
         _emit_general_opamp_block(lines, opamp, circuit.metadata)
     
@@ -285,69 +344,78 @@ def circuit_to_spice_netlist(circuit: Circuit) -> str:
     return "\n".join(lines)
 
 
-def _emit_general_opamp_block(lines: List[str], opamp: Component, metadata: Dict[str, str]) -> None:
+def _emit_general_opamp_block(lines: List[str], opamp: Component, metadata: Dict[str, str]) -> str | None:
     """
     Emit op-amp block for a general op-amp component.
     
     Uses node1=non-inverting, node2=inverting, and output_node from extra dict.
-    For OPAMP (with supply pins): Uses vcc_node and vee_node from extra, or supply rails from extra dict.
+    For OPAMP (with supply pins): Requires vcc_node and vee_node from extra (must be connected to supply sources).
     For OPAMP_ideal: Uses supply rails from extra dict if available, otherwise defaults.
+    
+    Returns:
+        Model file path if vendor model is used (for .include), None otherwise.
     """
     plus_node = opamp.node1
     minus_node = opamp.node2
     out_node = opamp.extra.get("output_node", "Vout")
     
-    # Get supply rails - for OPAMP use nodes, for OPAMP_ideal use voltage values
+    # First try per-component model selection, then fall back to circuit metadata
+    model_file = opamp.extra.get("model_file") or metadata.get("opamp_model_file")
+    subckt_name = opamp.extra.get("subckt_name") or metadata.get("opamp_subckt_name")
+    
     if opamp.ctype == "OPAMP":
-        # Use supply node references if available
+        # OPAMP requires vcc_node and vee_node from pin connections
         vcc_node = opamp.extra.get("vcc_node")
         vee_node = opamp.extra.get("vee_node")
-        # Fallback to voltage values if nodes not set
-        vcc = opamp.extra.get("vcc", 15.0) if not vcc_node else None
-        vee = opamp.extra.get("vee", -15.0) if not vee_node else None
+        
+        # Validate that both supply nodes are present
+        if not vcc_node or not vee_node:
+            raise ValueError(
+                f"Op-amp {opamp.ref} is missing VCC/VEE net connections. "
+                "Connect VCC and VEE pins to supply sources."
+            )
+        
+        if model_file and subckt_name:
+            # Vendor model path: emit only the subckt instance using the supply nodes
+            # Common pin order: +IN, -IN, OUT, VCC, VEE
+            lines.append(f"* Op-amp {opamp.ref}: supply pins VCC={vcc_node}, VEE={vee_node}")
+            lines.append(f"X{opamp.ref} {plus_node} {minus_node} {out_node} {vcc_node} {vee_node} {subckt_name}")
+            return model_file
+        else:
+            # Built-in OP284-like macromodel (no supply pins needed for internal model)
+            lines.append(f"* {opamp.ref}: OP284-like single-pole op-amp model")
+            lines.append("* A0 = 2e5, GBW ~ 4 MHz -> fp ~ 20 Hz")
+            nint = f"NINT_{opamp.ref}"
+            lines.append(f"EOPAMP_INT_{opamp.ref} {nint} 0 {plus_node} {minus_node} 2e5")
+            lines.append(f"RBUF_{opamp.ref} {nint} {out_node} 1")
+            lines.append(f"RPOLE_{opamp.ref} {out_node} 0 1k")
+            lines.append(f"CPOLE_{opamp.ref} {out_node} 0 7.9u")
+            return None
     else:
-        # OPAMP_ideal: use voltage values
+        # OPAMP_ideal: use voltage values (no supply pins in schematic)
         vcc = opamp.extra.get("vcc", 15.0)
         vee = opamp.extra.get("vee", -15.0)
-        vcc_node = None
-        vee_node = None
-    
-    model_file = metadata.get("opamp_model_file")
-    subckt_name = metadata.get("opamp_subckt_name")
-    
-    if model_file and subckt_name:
-        # Vendor model path
-        if opamp.ctype == "OPAMP" and vcc_node and vee_node:
-            # Use supply node references directly
-            lines.append(f'.include "{model_file}"')
-            lines.append(f"* Op-amp supply pins: VCC={vcc_node}, VEE={vee_node}")
-            # Common pin order: +IN, -IN, OUT, VCC, VEE
-            lines.append(f"X{opamp.ref} {plus_node} {minus_node} {out_node} {vcc_node} {vee_node} {subckt_name}")
-        else:
-            # Create supply voltage sources
+        
+        if model_file and subckt_name:
+            # Create supply voltage sources for OPAMP_ideal
             vcc_name = f"VCC_{opamp.ref}"
             vee_name = f"VEE_{opamp.ref}"
-            lines.append(f'.include "{model_file}"')
-            if vcc is not None and vee is not None:
-                lines.append(f"* Op-amp supply rails: VCC={vcc}V, VEE={vee}V")
-                lines.append(f"{vcc_name} {vcc_name} 0 DC {vcc}")
-                lines.append(f"{vee_name} {vee_name} 0 DC {vee}")
-            else:
-                # Default supplies
-                lines.append(f"* Op-amp supply rails: VCC=15V, VEE=-15V")
-                lines.append(f"{vcc_name} {vcc_name} 0 DC 15")
-                lines.append(f"{vee_name} {vee_name} 0 DC -15")
-        # Common pin order: +IN, -IN, OUT, VCC, VEE
+            lines.append(f"* Op-amp {opamp.ref} supply rails: VCC={vcc}V, VEE={vee}V")
+            lines.append(f"{vcc_name} {vcc_name} 0 DC {vcc}")
+            lines.append(f"{vee_name} {vee_name} 0 DC {vee}")
+            # Common pin order: +IN, -IN, OUT, VCC, VEE
             lines.append(f"X{opamp.ref} {plus_node} {minus_node} {out_node} {vcc_name} {vee_name} {subckt_name}")
-    else:
-        # Built-in OP284-like macromodel
-        lines.append(f"* {opamp.ref}: OP284-like single-pole op-amp model")
-        lines.append("* A0 = 2e5, GBW ~ 4 MHz -> fp ~ 20 Hz")
-        nint = f"NINT_{opamp.ref}"
-        lines.append(f"EOPAMP_INT_{opamp.ref} {nint} 0 {plus_node} {minus_node} 2e5")
-        lines.append(f"RBUF_{opamp.ref} {nint} {out_node} 1")
-        lines.append(f"RPOLE_{opamp.ref} {out_node} 0 1k")
-        lines.append(f"CPOLE_{opamp.ref} {out_node} 0 7.9u")
+            return model_file
+        else:
+            # Built-in OP284-like macromodel
+            lines.append(f"* {opamp.ref}: OP284-like single-pole op-amp model")
+            lines.append("* A0 = 2e5, GBW ~ 4 MHz -> fp ~ 20 Hz")
+            nint = f"NINT_{opamp.ref}"
+            lines.append(f"EOPAMP_INT_{opamp.ref} {nint} 0 {plus_node} {minus_node} 2e5")
+            lines.append(f"RBUF_{opamp.ref} {nint} {out_node} 1")
+            lines.append(f"RPOLE_{opamp.ref} {out_node} 0 1k")
+            lines.append(f"CPOLE_{opamp.ref} {out_node} 0 7.9u")
+            return None
 
 
 
@@ -370,6 +438,13 @@ def build_general_ac_netlist(
     """
     lines: List[str] = [f"* AC analysis for circuit: {circuit.name}"]
     lines.append("")
+
+    # Collect and emit model file includes
+    model_files = _collect_model_files(circuit)
+    if model_files:
+        for model_file in sorted(model_files):  # Sort for consistent output
+            lines.append(f'.include "{model_file}"')
+        lines.append("")
 
     # Select which voltage source will be used as AC input
     selected_v = None
@@ -428,9 +503,13 @@ def build_general_ac_netlist(
             gate_node = comp.extra.get("gate_node", "")
             bulk_node = comp.node2  # For 3-terminal MOSFET, bulk is always source
             model_name = comp.extra.get("model")
+            model_file = comp.extra.get("model_file")
             if not model_name:
                 mos_type = comp.extra.get("mos_type", "NMOS")
                 model_name = "NMOS_DEFAULT" if str(mos_type).upper() == "NMOS" else "PMOS_DEFAULT"
+                # Warn if model_file is present but model name is missing
+                if model_file:
+                    lines.append(f"* WARNING: {comp.ref} has model_file but no model name")
             lines.append(f"{comp.ref} {comp.node1} {gate_node} {comp.node2} {bulk_node} {model_name}")
         elif comp.ctype == "M_bulk":
             # 4-terminal MOSFET: has separate bulk node
@@ -438,9 +517,13 @@ def build_general_ac_netlist(
             gate_node = comp.extra.get("gate_node", "")
             bulk_node = comp.extra.get("bulk_node", comp.node2)
             model_name = comp.extra.get("model")
+            model_file = comp.extra.get("model_file")
             if not model_name:
                 mos_type = comp.extra.get("mos_type", "NMOS")
                 model_name = "NMOS_DEFAULT" if str(mos_type).upper() == "NMOS" else "PMOS_DEFAULT"
+                # Warn if model_file is present but model name is missing
+                if model_file:
+                    lines.append(f"* WARNING: {comp.ref} has model_file but no model name")
             lines.append(f"{comp.ref} {comp.node1} {gate_node} {comp.node2} {bulk_node} {model_name}")
         elif comp.ctype == "V":
             # Already handled above
@@ -451,10 +534,11 @@ def build_general_ac_netlist(
             ctrl_p = comp.extra.get("ctrl_p", "")
             ctrl_n = comp.extra.get("ctrl_n", "")
             lines.append(f"{comp.ref} {comp.node1} {comp.node2} {ctrl_p} {ctrl_n} {comp.value}")
-        elif comp.ctype == "OPAMP":
+        elif comp.ctype == "OPAMP" or comp.ctype == "OPAMP_ideal":
             opamps.append(comp)
     
     # Emit op-amp blocks
+    # Note: model files are already collected and emitted above
     for opamp in opamps:
         _emit_general_opamp_block(lines, opamp, circuit.metadata)
 
@@ -539,6 +623,13 @@ def build_ac_sweep_netlist(
     lines = [f"* AC sweep for bandwidth - {circuit.name}"]
     lines.append("")
 
+    # Collect and emit model file includes
+    model_files = _collect_model_files(circuit)
+    if model_files:
+        for model_file in sorted(model_files):  # Sort for consistent output
+            lines.append(f'.include "{model_file}"')
+        lines.append("")
+
     # Use output node from circuit metadata if available, otherwise use parameter default
     if "output_node" in circuit.metadata:
         output_node = circuit.metadata["output_node"]
@@ -606,9 +697,13 @@ def build_ac_sweep_netlist(
             gate_node = comp.extra.get("gate_node", "")
             bulk_node = comp.node2  # For 3-terminal MOSFET, bulk is always source
             model_name = comp.extra.get("model")
+            model_file = comp.extra.get("model_file")
             if not model_name:
                 mos_type = comp.extra.get("mos_type", "NMOS")
                 model_name = "NMOS_DEFAULT" if str(mos_type).upper() == "NMOS" else "PMOS_DEFAULT"
+                # Warn if model_file is present but model name is missing
+                if model_file:
+                    lines.append(f"* WARNING: {comp.ref} has model_file but no model name")
             lines.append(f"{comp.ref} {comp.node1} {gate_node} {comp.node2} {bulk_node} {model_name}")
         elif comp.ctype == "M_bulk":
             # 4-terminal MOSFET: has separate bulk node
@@ -616,9 +711,13 @@ def build_ac_sweep_netlist(
             gate_node = comp.extra.get("gate_node", "")
             bulk_node = comp.extra.get("bulk_node", comp.node2)
             model_name = comp.extra.get("model")
+            model_file = comp.extra.get("model_file")
             if not model_name:
                 mos_type = comp.extra.get("mos_type", "NMOS")
                 model_name = "NMOS_DEFAULT" if str(mos_type).upper() == "NMOS" else "PMOS_DEFAULT"
+                # Warn if model_file is present but model name is missing
+                if model_file:
+                    lines.append(f"* WARNING: {comp.ref} has model_file but no model name")
             lines.append(f"{comp.ref} {comp.node1} {gate_node} {comp.node2} {bulk_node} {model_name}")
         elif comp.ctype == "V":
             # Already handled above
@@ -629,10 +728,11 @@ def build_ac_sweep_netlist(
             ctrl_p = comp.extra.get("ctrl_p", "")
             ctrl_n = comp.extra.get("ctrl_n", "")
             lines.append(f"{comp.ref} {comp.node1} {comp.node2} {ctrl_p} {ctrl_n} {comp.value}")
-        elif comp.ctype == "OPAMP":
+        elif comp.ctype == "OPAMP" or comp.ctype == "OPAMP_ideal":
             opamps.append(comp)
     
     # Emit op-amp blocks
+    # Note: model files are already collected and emitted above
     for opamp in opamps:
         _emit_general_opamp_block(lines, opamp, circuit.metadata)
 
@@ -681,6 +781,13 @@ def build_dc_netlist(circuit: Circuit) -> str:
     """
     lines: List[str] = [f"* DC analysis (operating point) for circuit: {circuit.name}"]
     lines.append("")
+
+    # Collect and emit model file includes
+    model_files = _collect_model_files(circuit)
+    if model_files:
+        for model_file in sorted(model_files):  # Sort for consistent output
+            lines.append(f'.include "{model_file}"')
+        lines.append("")
     
     # Check if there's already a voltage source or current source
     has_vsource = False
@@ -737,9 +844,13 @@ def build_dc_netlist(circuit: Circuit) -> str:
             gate_node = comp.extra.get("gate_node", "")
             bulk_node = comp.node2  # For 3-terminal MOSFET, bulk is always source
             model_name = comp.extra.get("model")
+            model_file = comp.extra.get("model_file")
             if not model_name:
                 mos_type = comp.extra.get("mos_type", "NMOS")
                 model_name = "NMOS_DEFAULT" if str(mos_type).upper() == "NMOS" else "PMOS_DEFAULT"
+                # Warn if model_file is present but model name is missing
+                if model_file:
+                    lines.append(f"* WARNING: {comp.ref} has model_file but no model name")
             lines.append(f"{comp.ref} {comp.node1} {gate_node} {comp.node2} {bulk_node} {model_name}")
         elif comp.ctype == "M_bulk":
             # 4-terminal MOSFET: has separate bulk node
@@ -747,9 +858,13 @@ def build_dc_netlist(circuit: Circuit) -> str:
             gate_node = comp.extra.get("gate_node", "")
             bulk_node = comp.extra.get("bulk_node", comp.node2)
             model_name = comp.extra.get("model")
+            model_file = comp.extra.get("model_file")
             if not model_name:
                 mos_type = comp.extra.get("mos_type", "NMOS")
                 model_name = "NMOS_DEFAULT" if str(mos_type).upper() == "NMOS" else "PMOS_DEFAULT"
+                # Warn if model_file is present but model name is missing
+                if model_file:
+                    lines.append(f"* WARNING: {comp.ref} has model_file but no model name")
             lines.append(f"{comp.ref} {comp.node1} {gate_node} {comp.node2} {bulk_node} {model_name}")
         elif comp.ctype == "V":
             # Already handled above
@@ -761,7 +876,7 @@ def build_dc_netlist(circuit: Circuit) -> str:
             ctrl_p = comp.extra.get("ctrl_p", "")
             ctrl_n = comp.extra.get("ctrl_n", "")
             lines.append(f"{comp.ref} {comp.node1} {comp.node2} {ctrl_p} {ctrl_n} {comp.value}")
-        elif comp.ctype == "OPAMP":
+        elif comp.ctype == "OPAMP" or comp.ctype == "OPAMP_ideal":
             opamps.append(comp)
     
     # Emit op-amp blocks
@@ -818,6 +933,13 @@ def build_noise_netlist(
     """
     lines = [f"* Noise analysis - {circuit.name}"]
     lines.append("")
+
+    # Collect and emit model file includes
+    model_files = _collect_model_files(circuit)
+    if model_files:
+        for model_file in sorted(model_files):  # Sort for consistent output
+            lines.append(f'.include "{model_file}"')
+        lines.append("")
 
     # Select which voltage source will be used as AC input
     selected_v = None
@@ -882,9 +1004,13 @@ def build_noise_netlist(
             gate_node = comp.extra.get("gate_node", "")
             bulk_node = comp.node2  # For 3-terminal MOSFET, bulk is always source
             model_name = comp.extra.get("model")
+            model_file = comp.extra.get("model_file")
             if not model_name:
                 mos_type = comp.extra.get("mos_type", "NMOS")
                 model_name = "NMOS_DEFAULT" if str(mos_type).upper() == "NMOS" else "PMOS_DEFAULT"
+                # Warn if model_file is present but model name is missing
+                if model_file:
+                    lines.append(f"* WARNING: {comp.ref} has model_file but no model name")
             lines.append(f"{comp.ref} {comp.node1} {gate_node} {comp.node2} {bulk_node} {model_name}")
         elif comp.ctype == "M_bulk":
             # 4-terminal MOSFET: has separate bulk node
@@ -892,9 +1018,13 @@ def build_noise_netlist(
             gate_node = comp.extra.get("gate_node", "")
             bulk_node = comp.extra.get("bulk_node", comp.node2)
             model_name = comp.extra.get("model")
+            model_file = comp.extra.get("model_file")
             if not model_name:
                 mos_type = comp.extra.get("mos_type", "NMOS")
                 model_name = "NMOS_DEFAULT" if str(mos_type).upper() == "NMOS" else "PMOS_DEFAULT"
+                # Warn if model_file is present but model name is missing
+                if model_file:
+                    lines.append(f"* WARNING: {comp.ref} has model_file but no model name")
             lines.append(f"{comp.ref} {comp.node1} {gate_node} {comp.node2} {bulk_node} {model_name}")
         elif comp.ctype == "V":
             # Already handled above
@@ -905,10 +1035,11 @@ def build_noise_netlist(
             ctrl_p = comp.extra.get("ctrl_p", "")
             ctrl_n = comp.extra.get("ctrl_n", "")
             lines.append(f"{comp.ref} {comp.node1} {comp.node2} {ctrl_p} {ctrl_n} {comp.value}")
-        elif comp.ctype == "OPAMP":
+        elif comp.ctype == "OPAMP" or comp.ctype == "OPAMP_ideal":
             opamps.append(comp)
     
     # Emit op-amp blocks
+    # Note: model files are already collected and emitted above
     for opamp in opamps:
         _emit_general_opamp_block(lines, opamp, circuit.metadata)
 

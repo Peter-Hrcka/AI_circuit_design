@@ -735,18 +735,20 @@ class MainWindow(QMainWindow):
         self.prop_nets_label.setWordWrap(True)
         self.properties_form.addRow("Net connections:", self.prop_nets_label)
         
-        # Extra parameters (read-only for now, can be made editable later)
-        self.prop_extra_label = QLabel("—")
-        self.prop_extra_label.setWordWrap(True)
-        self.properties_form.addRow("Extra parameters:", self.prop_extra_label)
-        
         props_layout.addLayout(self.properties_form)
         
-        # Advanced properties button (optional - for complex edits)
-        self.btn_properties_dialog = QPushButton("Advanced Properties...")
-        self.btn_properties_dialog.clicked.connect(self._on_open_properties_dialog)
-        self.btn_properties_dialog.setEnabled(False)
-        props_layout.addWidget(self.btn_properties_dialog)
+        # Extra Properties group
+        self.extra_group = QGroupBox("Extra Properties")
+        self.extra_form = QFormLayout()
+        self.extra_group.setLayout(self.extra_form)
+        props_layout.addWidget(self.extra_group)
+        
+        # Create all extra property widgets (hidden by default)
+        self.extra_widgets = {}
+        self._create_extra_property_widgets()
+        
+        # Hide all extra fields initially
+        self._hide_all_extra_fields()
         
         props_layout.addStretch()
         tabs.addTab(props_widget, "Properties")
@@ -830,6 +832,340 @@ class MainWindow(QMainWindow):
         
         # Populate AC source list
         self._refresh_ac_source_list()
+    
+    def _create_extra_property_widgets(self):
+        """Create all extra property widgets and store them in self.extra_widgets."""
+        # Store row indices for easy access
+        self.extra_row_indices = {}
+        row_idx = 0
+        
+        # OPAMP / OPAMP_ideal widgets
+        # model_file
+        opamp_model_file_layout = QHBoxLayout()
+        opamp_model_file_edit = QLineEdit()
+        opamp_model_file_edit.setReadOnly(True)
+        opamp_model_file_browse = QPushButton("Browse...")
+        opamp_model_file_clear = QPushButton("Clear")
+        opamp_model_file_layout.addWidget(opamp_model_file_edit)
+        opamp_model_file_layout.addWidget(opamp_model_file_browse)
+        opamp_model_file_layout.addWidget(opamp_model_file_clear)
+        self.extra_widgets["opamp_model_file_edit"] = opamp_model_file_edit
+        self.extra_widgets["opamp_model_file_browse"] = opamp_model_file_browse
+        self.extra_widgets["opamp_model_file_clear"] = opamp_model_file_clear
+        opamp_model_file_browse.clicked.connect(lambda: self._browse_opamp_model_file())
+        opamp_model_file_clear.clicked.connect(lambda: self._clear_opamp_model_file())
+        self.extra_form.addRow("Model File:", opamp_model_file_layout)
+        self.extra_row_indices["opamp_model_file"] = row_idx
+        row_idx += 1
+        
+        # subckt_name
+        opamp_subckt_layout = QHBoxLayout()
+        opamp_subckt_edit = QLineEdit()
+        opamp_subckt_auto = QPushButton("Auto-detect")
+        opamp_subckt_layout.addWidget(opamp_subckt_edit)
+        opamp_subckt_layout.addWidget(opamp_subckt_auto)
+        self.extra_widgets["opamp_subckt_edit"] = opamp_subckt_edit
+        self.extra_widgets["opamp_subckt_auto"] = opamp_subckt_auto
+        opamp_subckt_auto.clicked.connect(lambda: self._auto_detect_opamp_subckt())
+        self.extra_form.addRow("Subckt name:", opamp_subckt_layout)
+        self.extra_row_indices["opamp_subckt"] = row_idx
+        row_idx += 1
+        
+        # MOSFET widgets
+        # mos_type
+        mosfet_mos_type_combo = QComboBox()
+        mosfet_mos_type_combo.addItems(["NMOS", "PMOS"])
+        self.extra_widgets["mosfet_mos_type"] = mosfet_mos_type_combo
+        mosfet_mos_type_combo.currentTextChanged.connect(self._on_extra_property_changed)
+        self.extra_form.addRow("Type:", mosfet_mos_type_combo)
+        self.extra_row_indices["mosfet_mos_type"] = row_idx
+        row_idx += 1
+        
+        # model_file
+        mosfet_model_file_layout = QHBoxLayout()
+        mosfet_model_file_edit = QLineEdit()
+        mosfet_model_file_edit.setReadOnly(True)
+        mosfet_model_file_browse = QPushButton("Browse...")
+        mosfet_model_file_clear = QPushButton("Clear")
+        mosfet_model_file_layout.addWidget(mosfet_model_file_edit)
+        mosfet_model_file_layout.addWidget(mosfet_model_file_browse)
+        mosfet_model_file_layout.addWidget(mosfet_model_file_clear)
+        self.extra_widgets["mosfet_model_file_edit"] = mosfet_model_file_edit
+        self.extra_widgets["mosfet_model_file_browse"] = mosfet_model_file_browse
+        self.extra_widgets["mosfet_model_file_clear"] = mosfet_model_file_clear
+        mosfet_model_file_browse.clicked.connect(lambda: self._browse_mosfet_model_file())
+        mosfet_model_file_clear.clicked.connect(lambda: self._clear_mosfet_model_file())
+        self.extra_form.addRow("Model File:", mosfet_model_file_layout)
+        self.extra_row_indices["mosfet_model_file"] = row_idx
+        row_idx += 1
+        
+        # model
+        mosfet_model_layout = QHBoxLayout()
+        mosfet_model_edit = QLineEdit()
+        mosfet_model_auto = QPushButton("Auto-detect")
+        mosfet_model_layout.addWidget(mosfet_model_edit)
+        mosfet_model_layout.addWidget(mosfet_model_auto)
+        self.extra_widgets["mosfet_model"] = mosfet_model_edit
+        self.extra_widgets["mosfet_model_auto"] = mosfet_model_auto
+        mosfet_model_edit.textChanged.connect(self._on_extra_property_changed)
+        mosfet_model_auto.clicked.connect(lambda: self._auto_detect_mosfet_model())
+        self.extra_form.addRow("SPICE Model:", mosfet_model_layout)
+        self.extra_row_indices["mosfet_model"] = row_idx
+        row_idx += 1
+        
+        # Voltage source widgets
+        # dc_level
+        v_dc_level_spin = QDoubleSpinBox()
+        v_dc_level_spin.setRange(-1e6, 1e6)
+        v_dc_level_spin.setDecimals(3)
+        v_dc_level_spin.setSuffix(" V")
+        self.extra_widgets["v_dc_level"] = v_dc_level_spin
+        v_dc_level_spin.valueChanged.connect(self._on_extra_property_changed)
+        self.extra_form.addRow("DC Level:", v_dc_level_spin)
+        self.extra_row_indices["v_dc_level"] = row_idx
+        row_idx += 1
+        
+        # ac_amplitude
+        v_ac_amplitude_spin = QDoubleSpinBox()
+        v_ac_amplitude_spin.setRange(0.0, 1e6)
+        v_ac_amplitude_spin.setDecimals(3)
+        v_ac_amplitude_spin.setSuffix(" V")
+        self.extra_widgets["v_ac_amplitude"] = v_ac_amplitude_spin
+        v_ac_amplitude_spin.valueChanged.connect(self._on_extra_property_changed)
+        self.extra_form.addRow("AC Amplitude:", v_ac_amplitude_spin)
+        self.extra_row_indices["v_ac_amplitude"] = row_idx
+        row_idx += 1
+        
+        # Capacitor widgets
+        # tolerance
+        c_tolerance_spin = QDoubleSpinBox()
+        c_tolerance_spin.setRange(0.0, 100.0)
+        c_tolerance_spin.setDecimals(2)
+        c_tolerance_spin.setSuffix(" %")
+        self.extra_widgets["c_tolerance"] = c_tolerance_spin
+        c_tolerance_spin.valueChanged.connect(self._on_extra_property_changed)
+        self.extra_form.addRow("Tolerance:", c_tolerance_spin)
+        self.extra_row_indices["c_tolerance"] = row_idx
+        row_idx += 1
+        
+        # esr
+        c_esr_spin = QDoubleSpinBox()
+        c_esr_spin.setRange(0.0, 1e6)
+        c_esr_spin.setDecimals(6)
+        c_esr_spin.setSuffix(" Ω")
+        self.extra_widgets["c_esr"] = c_esr_spin
+        c_esr_spin.valueChanged.connect(self._on_extra_property_changed)
+        self.extra_form.addRow("ESR:", c_esr_spin)
+        self.extra_row_indices["c_esr"] = row_idx
+        row_idx += 1
+        
+        # Diode widgets
+        # model
+        d_model_edit = QLineEdit()
+        self.extra_widgets["d_model"] = d_model_edit
+        d_model_edit.textChanged.connect(self._on_extra_property_changed)
+        self.extra_form.addRow("SPICE Model:", d_model_edit)
+        self.extra_row_indices["d_model"] = row_idx
+        row_idx += 1
+        
+        # BJT widgets
+        # polarity
+        bjt_polarity_combo = QComboBox()
+        bjt_polarity_combo.addItems(["NPN", "PNP"])
+        self.extra_widgets["bjt_polarity"] = bjt_polarity_combo
+        bjt_polarity_combo.currentTextChanged.connect(self._on_extra_property_changed)
+        self.extra_form.addRow("Polarity:", bjt_polarity_combo)
+        self.extra_row_indices["bjt_polarity"] = row_idx
+        row_idx += 1
+        
+        # model
+        bjt_model_edit = QLineEdit()
+        self.extra_widgets["bjt_model"] = bjt_model_edit
+        bjt_model_edit.textChanged.connect(self._on_extra_property_changed)
+        self.extra_form.addRow("SPICE Model:", bjt_model_edit)
+        self.extra_row_indices["bjt_model"] = row_idx
+        row_idx += 1
+    
+    def _hide_all_extra_fields(self):
+        """Hide and disable all extra property widgets and their labels."""
+        # Hide all widgets
+        for widget in self.extra_widgets.values():
+            if isinstance(widget, QHBoxLayout):
+                # For layouts, hide all widgets inside
+                for i in range(widget.count()):
+                    item = widget.itemAt(i)
+                    if item and item.widget():
+                        item.widget().setVisible(False)
+                        item.widget().setEnabled(False)
+                continue
+            widget.setVisible(False)
+            widget.setEnabled(False)
+        
+        # Hide labels by iterating through form layout
+        for i in range(self.extra_form.rowCount()):
+            label_item = self.extra_form.itemAt(i, QFormLayout.LabelRole)
+            field_item = self.extra_form.itemAt(i, QFormLayout.FieldRole)
+            if label_item and label_item.widget():
+                label_item.widget().setVisible(False)
+            if field_item:
+                # Field might be a layout or widget
+                if field_item.widget():
+                    field_item.widget().setVisible(False)
+                elif field_item.layout():
+                    # Hide all widgets in the layout
+                    layout = field_item.layout()
+                    for j in range(layout.count()):
+                        layout_item = layout.itemAt(j)
+                        if layout_item and layout_item.widget():
+                            layout_item.widget().setVisible(False)
+        
+        # Also hide the group box
+        self.extra_group.setVisible(False)
+    
+    def _show_extra_fields_for_component(self, comp):
+        """Show only the relevant extra fields for the component type and populate them."""
+        # Hide all first
+        self._hide_all_extra_fields()
+        
+        # Show the group box
+        self.extra_group.setVisible(True)
+        
+        # Helper to show a row (label + field)
+        def show_row(row_index):
+            label_item = self.extra_form.itemAt(row_index, QFormLayout.LabelRole)
+            field_item = self.extra_form.itemAt(row_index, QFormLayout.FieldRole)
+            if label_item and label_item.widget():
+                label_item.widget().setVisible(True)
+            if field_item:
+                if field_item.widget():
+                    field_item.widget().setVisible(True)
+                elif field_item.layout():
+                    layout = field_item.layout()
+                    for j in range(layout.count()):
+                        layout_item = layout.itemAt(j)
+                        if layout_item and layout_item.widget():
+                            layout_item.widget().setVisible(True)
+        
+        # Show and populate fields based on component type
+        if comp.ctype == "OPAMP" or comp.ctype == "OPAMP_ideal":
+            # OPAMP fields
+            show_row(self.extra_row_indices["opamp_model_file"])
+            show_row(self.extra_row_indices["opamp_subckt"])
+            
+            # Enable widgets
+            self.extra_widgets["opamp_model_file_edit"].setEnabled(True)
+            self.extra_widgets["opamp_model_file_browse"].setEnabled(True)
+            self.extra_widgets["opamp_model_file_clear"].setEnabled(True)
+            self.extra_widgets["opamp_subckt_edit"].setEnabled(True)
+            self.extra_widgets["opamp_subckt_auto"].setEnabled(True)
+            
+            # Populate values (block signals to prevent updates during population)
+            model_file = comp.extra.get("model_file", "")
+            self.extra_widgets["opamp_model_file_edit"].blockSignals(True)
+            self.extra_widgets["opamp_model_file_edit"].setText(str(model_file))
+            self.extra_widgets["opamp_model_file_edit"].blockSignals(False)
+            subckt_name = comp.extra.get("subckt_name", "")
+            self.extra_widgets["opamp_subckt_edit"].blockSignals(True)
+            self.extra_widgets["opamp_subckt_edit"].setText(str(subckt_name))
+            self.extra_widgets["opamp_subckt_edit"].blockSignals(False)
+            
+        elif comp.ctype == "M" or comp.ctype == "M_bulk":
+            # MOSFET fields
+            show_row(self.extra_row_indices["mosfet_mos_type"])
+            show_row(self.extra_row_indices["mosfet_model_file"])
+            show_row(self.extra_row_indices["mosfet_model"])
+            
+            # Enable widgets
+            self.extra_widgets["mosfet_mos_type"].setEnabled(True)
+            self.extra_widgets["mosfet_model_file_edit"].setEnabled(True)
+            self.extra_widgets["mosfet_model_file_browse"].setEnabled(True)
+            self.extra_widgets["mosfet_model_file_clear"].setEnabled(True)
+            self.extra_widgets["mosfet_model"].setEnabled(True)
+            self.extra_widgets["mosfet_model_auto"].setEnabled(True)
+            
+            # Populate values (block signals to prevent updates during population)
+            mos_type = comp.extra.get("mos_type", "NMOS")
+            self.extra_widgets["mosfet_mos_type"].blockSignals(True)
+            self.extra_widgets["mosfet_mos_type"].setCurrentText(str(mos_type).upper())
+            self.extra_widgets["mosfet_mos_type"].blockSignals(False)
+            model_file = comp.extra.get("model_file", "")
+            self.extra_widgets["mosfet_model_file_edit"].blockSignals(True)
+            self.extra_widgets["mosfet_model_file_edit"].setText(str(model_file))
+            self.extra_widgets["mosfet_model_file_edit"].blockSignals(False)
+            model = comp.extra.get("model", "")
+            self.extra_widgets["mosfet_model"].blockSignals(True)
+            self.extra_widgets["mosfet_model"].setText(str(model))
+            self.extra_widgets["mosfet_model"].blockSignals(False)
+            
+        elif comp.ctype == "V":
+            # Voltage source fields
+            show_row(self.extra_row_indices["v_dc_level"])
+            show_row(self.extra_row_indices["v_ac_amplitude"])
+            
+            # Enable widgets
+            self.extra_widgets["v_dc_level"].setEnabled(True)
+            self.extra_widgets["v_ac_amplitude"].setEnabled(True)
+            
+            # Populate values (block signals to prevent updates during population)
+            dc_level = comp.extra.get("dc_level", comp.value)
+            self.extra_widgets["v_dc_level"].blockSignals(True)
+            self.extra_widgets["v_dc_level"].setValue(float(dc_level))
+            self.extra_widgets["v_dc_level"].blockSignals(False)
+            ac_amplitude = comp.extra.get("ac_amplitude", 0.0)
+            self.extra_widgets["v_ac_amplitude"].blockSignals(True)
+            self.extra_widgets["v_ac_amplitude"].setValue(float(ac_amplitude))
+            self.extra_widgets["v_ac_amplitude"].blockSignals(False)
+            
+        elif comp.ctype == "C":
+            # Capacitor fields
+            show_row(self.extra_row_indices["c_tolerance"])
+            show_row(self.extra_row_indices["c_esr"])
+            
+            # Enable widgets
+            self.extra_widgets["c_tolerance"].setEnabled(True)
+            self.extra_widgets["c_esr"].setEnabled(True)
+            
+            # Populate values (block signals to prevent updates during population)
+            tolerance = comp.extra.get("tolerance", 0.0)
+            self.extra_widgets["c_tolerance"].blockSignals(True)
+            self.extra_widgets["c_tolerance"].setValue(float(tolerance))
+            self.extra_widgets["c_tolerance"].blockSignals(False)
+            esr = comp.extra.get("esr", 0.0)
+            self.extra_widgets["c_esr"].blockSignals(True)
+            self.extra_widgets["c_esr"].setValue(float(esr))
+            self.extra_widgets["c_esr"].blockSignals(False)
+            
+        elif comp.ctype == "D":
+            # Diode fields
+            show_row(self.extra_row_indices["d_model"])
+            
+            # Enable widgets
+            self.extra_widgets["d_model"].setEnabled(True)
+            
+            # Populate values (block signals to prevent updates during population)
+            model = comp.extra.get("model", "")
+            self.extra_widgets["d_model"].blockSignals(True)
+            self.extra_widgets["d_model"].setText(str(model))
+            self.extra_widgets["d_model"].blockSignals(False)
+            
+        elif comp.ctype == "Q":
+            # BJT fields
+            show_row(self.extra_row_indices["bjt_polarity"])
+            show_row(self.extra_row_indices["bjt_model"])
+            
+            # Enable widgets
+            self.extra_widgets["bjt_polarity"].setEnabled(True)
+            self.extra_widgets["bjt_model"].setEnabled(True)
+            
+            # Populate values (block signals to prevent updates during population)
+            polarity = comp.extra.get("polarity", "NPN")
+            self.extra_widgets["bjt_polarity"].blockSignals(True)
+            self.extra_widgets["bjt_polarity"].setCurrentText(str(polarity).upper())
+            self.extra_widgets["bjt_polarity"].blockSignals(False)
+            model = comp.extra.get("model", "")
+            self.extra_widgets["bjt_model"].blockSignals(True)
+            self.extra_widgets["bjt_model"].setText(str(model))
+            self.extra_widgets["bjt_model"].blockSignals(False)
 
     def _setup_bottom_dock(self):
         """Create bottom dock widget for Log / Results."""
@@ -973,6 +1309,226 @@ class MainWindow(QMainWindow):
         """Append a line to the output box."""
         self.output.append(text)
     
+    def _clear_opamp_model_file(self):
+        """Clear OPAMP model file."""
+        self.extra_widgets["opamp_model_file_edit"].clear()
+        self._on_extra_property_changed()
+    
+    def _clear_mosfet_model_file(self):
+        """Clear MOSFET model file."""
+        self.extra_widgets["mosfet_model_file_edit"].clear()
+        self._on_extra_property_changed()
+    
+    def _browse_opamp_model_file(self):
+        """Browse for OPAMP model file."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Op-Amp Model File",
+            "",
+            "SPICE Models (*.lib *.cir *.sub *.sp *.spi *.model);;All Files (*.*)"
+        )
+        if file_path:
+            self.extra_widgets["opamp_model_file_edit"].setText(file_path)
+            self._on_extra_property_changed()
+    
+    def _browse_mosfet_model_file(self):
+        """Browse for MOSFET model file."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select MOSFET Model File",
+            "",
+            "SPICE Models (*.lib *.cir *.sub *.sp *.spi *.model);;All Files (*.*)"
+        )
+        if file_path:
+            self.extra_widgets["mosfet_model_file_edit"].setText(file_path)
+            self._on_extra_property_changed()
+    
+    def _auto_detect_opamp_subckt(self):
+        """Auto-detect subckt name from OPAMP model file."""
+        model_file = self.extra_widgets["opamp_model_file_edit"].text().strip()
+        if not model_file:
+            QMessageBox.warning(
+                self,
+                "No Model File",
+                "Please select a model file first."
+            )
+            return
+        
+        try:
+            meta = analyze_model(model_file)
+            if meta.model_names:
+                self.extra_widgets["opamp_subckt_edit"].setText(meta.model_names[0])
+                self._on_extra_property_changed()
+            else:
+                QMessageBox.information(
+                    self,
+                    "No Subckt Found",
+                    "No subckt names were found in the model file."
+                )
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Error",
+                f"Failed to analyze model file:\n{str(e)}"
+            )
+    
+    def _auto_detect_mosfet_model(self):
+        """Auto-detect model name from MOSFET model file."""
+        model_file = self.extra_widgets["mosfet_model_file_edit"].text().strip()
+        if not model_file:
+            QMessageBox.warning(
+                self,
+                "No Model File",
+                "Please select a model file first."
+            )
+            return
+        
+        try:
+            meta = analyze_model(model_file)
+            if meta.model_names:
+                self.extra_widgets["mosfet_model"].setText(meta.model_names[0])
+                self._on_extra_property_changed()
+            else:
+                QMessageBox.information(
+                    self,
+                    "No Model Found",
+                    "No model names were found in the model file."
+                )
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Error",
+                f"Failed to analyze model file:\n{str(e)}"
+            )
+    
+    def _on_extra_property_changed(self):
+        """Handle changes to extra property fields."""
+        if not self.selected_component_ref:
+            return
+        
+        # Find component in schematic model
+        schematic_comp = None
+        if hasattr(self, "schematic_view") and self.schematic_view.model:
+            for comp in self.schematic_view.model.components:
+                if comp.ref == self.selected_component_ref:
+                    schematic_comp = comp
+                    break
+        
+        if schematic_comp is None:
+            return
+        
+        # Update component extra properties based on type
+        if schematic_comp.ctype == "OPAMP" or schematic_comp.ctype == "OPAMP_ideal":
+            # OPAMP properties
+            model_file = self.extra_widgets["opamp_model_file_edit"].text().strip()
+            if model_file:
+                schematic_comp.extra["model_file"] = model_file
+            else:
+                schematic_comp.extra.pop("model_file", None)
+            
+            subckt_name = self.extra_widgets["opamp_subckt_edit"].text().strip()
+            if subckt_name:
+                schematic_comp.extra["subckt_name"] = subckt_name
+            else:
+                schematic_comp.extra.pop("subckt_name", None)
+            
+        elif schematic_comp.ctype == "M" or schematic_comp.ctype == "M_bulk":
+            # MOSFET properties
+            schematic_comp.extra["mos_type"] = self.extra_widgets["mosfet_mos_type"].currentText()
+            
+            model_file = self.extra_widgets["mosfet_model_file_edit"].text().strip()
+            if model_file:
+                schematic_comp.extra["model_file"] = model_file
+            else:
+                schematic_comp.extra.pop("model_file", None)
+            
+            model = self.extra_widgets["mosfet_model"].text().strip()
+            if model:
+                schematic_comp.extra["model"] = model
+            else:
+                schematic_comp.extra.pop("model", None)
+            
+        elif schematic_comp.ctype == "V":
+            # Voltage source properties
+            dc_level = self.extra_widgets["v_dc_level"].value()
+            schematic_comp.extra["dc_level"] = dc_level
+            schematic_comp.value = dc_level  # Sync to component.value
+            schematic_comp.extra["ac_amplitude"] = self.extra_widgets["v_ac_amplitude"].value()
+            
+        elif schematic_comp.ctype == "C":
+            # Capacitor properties
+            schematic_comp.extra["tolerance"] = self.extra_widgets["c_tolerance"].value()
+            schematic_comp.extra["esr"] = self.extra_widgets["c_esr"].value()
+            
+        elif schematic_comp.ctype == "D":
+            # Diode properties
+            model = self.extra_widgets["d_model"].text().strip()
+            if model:
+                schematic_comp.extra["model"] = model
+            else:
+                schematic_comp.extra.pop("model", None)
+            
+        elif schematic_comp.ctype == "Q":
+            # BJT properties
+            schematic_comp.extra["polarity"] = self.extra_widgets["bjt_polarity"].currentText()
+            model = self.extra_widgets["bjt_model"].text().strip()
+            if model:
+                schematic_comp.extra["model"] = model
+            else:
+                schematic_comp.extra.pop("model", None)
+        
+        # Update circuit if it exists
+        if self.current_circuit:
+            circuit_comp = None
+            for comp in self.current_circuit.components:
+                if getattr(comp, "ref", "") == self.selected_component_ref:
+                    circuit_comp = comp
+                    break
+            
+            if circuit_comp:
+                # Sync extra fields to circuit component
+                if schematic_comp.ctype == "OPAMP" or schematic_comp.ctype == "OPAMP_ideal":
+                    if "model_file" in schematic_comp.extra:
+                        circuit_comp.extra["model_file"] = schematic_comp.extra["model_file"]
+                    else:
+                        circuit_comp.extra.pop("model_file", None)
+                    if "subckt_name" in schematic_comp.extra:
+                        circuit_comp.extra["subckt_name"] = schematic_comp.extra["subckt_name"]
+                    else:
+                        circuit_comp.extra.pop("subckt_name", None)
+                elif schematic_comp.ctype == "M" or schematic_comp.ctype == "M_bulk":
+                    circuit_comp.extra["mos_type"] = schematic_comp.extra.get("mos_type", "NMOS")
+                    if "model_file" in schematic_comp.extra:
+                        circuit_comp.extra["model_file"] = schematic_comp.extra["model_file"]
+                    else:
+                        circuit_comp.extra.pop("model_file", None)
+                    if "model" in schematic_comp.extra:
+                        circuit_comp.extra["model"] = schematic_comp.extra["model"]
+                    else:
+                        circuit_comp.extra.pop("model", None)
+                elif schematic_comp.ctype == "V":
+                    circuit_comp.extra["dc_level"] = schematic_comp.extra.get("dc_level", 0.0)
+                    circuit_comp.extra["ac_amplitude"] = schematic_comp.extra.get("ac_amplitude", 0.0)
+                    circuit_comp.value = schematic_comp.value
+                elif schematic_comp.ctype == "C":
+                    circuit_comp.extra["tolerance"] = schematic_comp.extra.get("tolerance", 0.0)
+                    circuit_comp.extra["esr"] = schematic_comp.extra.get("esr", 0.0)
+                elif schematic_comp.ctype == "D":
+                    if "model" in schematic_comp.extra:
+                        circuit_comp.extra["model"] = schematic_comp.extra["model"]
+                    else:
+                        circuit_comp.extra.pop("model", None)
+                elif schematic_comp.ctype == "Q":
+                    circuit_comp.extra["polarity"] = schematic_comp.extra.get("polarity", "NPN")
+                    if "model" in schematic_comp.extra:
+                        circuit_comp.extra["model"] = schematic_comp.extra["model"]
+                    else:
+                        circuit_comp.extra.pop("model", None)
+        
+        # Redraw schematic
+        if hasattr(self, "schematic_view"):
+            self.schematic_view._redraw_from_model()
+    
     def _refresh_ac_source_list(self) -> None:
         """
         Populate the AC source combo with voltage sources from the current schematic.
@@ -1032,6 +1588,93 @@ class MainWindow(QMainWindow):
         if path and hasattr(self, 'model_path_edit') and self.model_path_edit is not None:
             self.model_path_edit.setText(path)
 
+    def _analyze_and_maybe_convert_component_models(self, model: SchematicModel) -> dict:
+        """
+        Analyze and optionally convert model files for components in the schematic.
+        
+        For OPAMP components:
+        - Analyzes model_file if present
+        - Converts to simple opamp if needed
+        - Updates component's extra["model_file"] with converted path
+        - Sets extra["subckt_name"] if empty and model names are available
+        
+        For MOSFET components:
+        - Analyzes model_file if present (no conversion)
+        
+        Returns:
+            dict with:
+            - "metas": list of ModelMetadata objects
+            - "recommended_backend": "xyce" or "ngspice"
+        """
+        from core.model_metadata import ModelMetadata, ModelFeatureFlags
+        
+        metas: list[ModelMetadata] = []
+        
+        for comp in model.components:
+            if comp.ctype == "OPAMP" or comp.ctype == "OPAMP_ideal":
+                model_file = comp.extra.get("model_file")
+                if model_file:
+                    try:
+                        # Analyze original model
+                        meta_orig = analyze_model(model_file)
+                        self.log(f"Analyzing OPAMP {comp.ref} model: {meta_orig.short_summary()}")
+                        
+                        # Convert if needed
+                        meta_conv = maybe_convert_to_simple_opamp(meta_orig, auto_for_nonstandard=True)
+                        
+                        # Update component's model_file to converted path
+                        if meta_conv.path != meta_orig.path:
+                            comp.extra["model_file"] = meta_conv.path
+                            self.log(f"  Converted: {meta_orig.path} -> {meta_conv.path}")
+                            for w in meta_conv.conversion_warnings:
+                                self.log(f"  Warning: {w}")
+                        
+                        # Set subckt_name if empty and model names are available
+                        if not comp.extra.get("subckt_name") and meta_conv.model_names:
+                            comp.extra["subckt_name"] = meta_conv.model_names[0]
+                            self.log(f"  Auto-set subckt_name: {meta_conv.model_names[0]}")
+                        
+                        metas.append(meta_conv)
+                    except Exception as exc:
+                        self.log(f"  ERROR analyzing {comp.ref} model: {exc}")
+                        QMessageBox.warning(
+                            self,
+                            "Model Analysis Error",
+                            f"Failed to analyze model for {comp.ref}:\n{exc}"
+                        )
+            
+            elif comp.ctype == "M" or comp.ctype == "M_bulk":
+                model_file = comp.extra.get("model_file")
+                if model_file:
+                    try:
+                        meta = analyze_model(model_file)
+                        self.log(f"Analyzing MOSFET {comp.ref} model: {meta.short_summary()}")
+                        metas.append(meta)
+                    except Exception as exc:
+                        self.log(f"  ERROR analyzing {comp.ref} model: {exc}")
+                        QMessageBox.warning(
+                            self,
+                            "Model Analysis Error",
+                            f"Failed to analyze model for {comp.ref}:\n{exc}"
+                        )
+        
+        # Decide best simulator backend
+        recommended_backend = "ngspice"  # default
+        if metas:
+            # If any model recommends xyce, use xyce
+            if any(meta.recommended_simulator == "xyce" for meta in metas):
+                recommended_backend = "xyce"
+            else:
+                recommended_backend = "ngspice"
+        
+        self.log(f"Recommended backend: {recommended_backend}")
+        self.log("")
+        
+        return {
+            "metas": metas,
+            "recommended_backend": recommended_backend,
+        }
+    
     def _load_model_with_conversion(self, path: str) -> Optional[ModelMetadata]:
         try:
             meta_orig = analyze_model(path)
@@ -1068,15 +1711,6 @@ class MainWindow(QMainWindow):
     def on_run(self) -> None:
         self.output.clear()
 
-        # Get model path
-        if not hasattr(self, 'model_path_edit') or self.model_path_edit is None:
-            QMessageBox.warning(self, "Error", "GUI controls not initialized. Please restart the application.")
-            return
-        model_path = self.model_path_edit.text().strip()
-        if not model_path:
-            QMessageBox.warning(self, "Missing model", "Please select a vendor model (.lib) first.")
-            return
-
         # Get target gain
         try:
             if not hasattr(self, 'target_gain_edit') or self.target_gain_edit is None:
@@ -1100,15 +1734,56 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Invalid frequency", "Please enter a numeric frequency (Hz).")
             return
 
-        model_path = str(Path(model_path))  # normalize
-
-        # 1) Analyze & maybe convert model
-        meta_model = self._load_model_with_conversion(model_path)
-        if meta_model is None:
-            return
-        self.last_model_meta = meta_model
         self.last_freq_hz = freq_hz
         self.last_target_gain_db = target_gain_db
+
+        # 0) Analyze and convert component-level models if schematic exists
+        component_model_info = None
+        if hasattr(self, "schematic_view") and self.schematic_view.model:
+            self.log("Analyzing component-level models...")
+            component_model_info = self._analyze_and_maybe_convert_component_models(self.schematic_view.model)
+        
+        # 1) Get model path (for backward compatibility with Analysis Setup UI)
+        model_path = None
+        meta_model = None
+        if hasattr(self, 'model_path_edit') and self.model_path_edit is not None:
+            model_path = self.model_path_edit.text().strip()
+            if model_path:
+                # Use Analysis Setup model file (backward compatibility)
+                meta_model = self._load_model_with_conversion(model_path)
+                if meta_model is None:
+                    return
+                self.last_model_meta = meta_model
+        
+        # Create synthetic ModelMetadata for backend selection
+        # Prefer component-level analysis, fall back to Analysis Setup model
+        if component_model_info:
+            recommended_backend = component_model_info["recommended_backend"]
+            # Create synthetic metadata with recommended backend
+            from core.model_metadata import ModelMetadata, ModelFeatureFlags
+            synthetic_meta = ModelMetadata(
+                path="",
+                basename="synthetic",
+                recommended_simulator=recommended_backend,
+                supports_ngspice=(recommended_backend == "ngspice"),
+                supports_xyce=(recommended_backend == "xyce"),
+            )
+            meta_model = synthetic_meta
+        elif meta_model:
+            # Use the Analysis Setup model metadata
+            pass
+        else:
+            # No models at all - use default ngspice
+            from core.model_metadata import ModelMetadata, ModelFeatureFlags
+            meta_model = ModelMetadata(
+                path="",
+                basename="default",
+                recommended_simulator="ngspice",
+                supports_ngspice=True,
+                supports_xyce=False,
+            )
+        
+        self.last_model_meta = meta_model
 
         # 2) Build initial circuit
         circuit = non_inverting_opamp_template()
@@ -1121,19 +1796,24 @@ class MainWindow(QMainWindow):
             )
         self.log("")
 
-        # Choose subckt name to use when instantiating:
-        if meta_model.model_names:
-            subckt_name = meta_model.model_names[0]
-        else:
-            subckt_name = Path(meta_model.path).stem
+        # Attach model to circuit (only if we have a real model path, not synthetic)
+        # If component-level models exist, they're already in the schematic and will be used
+        # when building circuits from schematic. For this template-based flow, only attach
+        # if we have an Analysis Setup model file.
+        if meta_model.path and meta_model.path != "" and meta_model.path != "synthetic" and meta_model.path != "default":
+            # Choose subckt name to use when instantiating:
+            if meta_model.model_names:
+                subckt_name = meta_model.model_names[0]
+            else:
+                subckt_name = Path(meta_model.path).stem
 
-        # Attach the model to the circuit
-        attach_vendor_opamp_model(
-            circuit,
-            model_file=meta_model.path,
-            subckt_name=subckt_name,
-            meta=meta_model,
-        )
+            # Attach the model to the circuit
+            attach_vendor_opamp_model(
+                circuit,
+                model_file=meta_model.path,
+                subckt_name=subckt_name,
+                meta=meta_model,
+            )
 
         # 3) Ideal optimization
         ideal_circuit, ideal_gain_db = optimize_gain_for_non_inverting_stage(
@@ -1247,7 +1927,7 @@ class MainWindow(QMainWindow):
             for comp in self.schematic_view.model.components:
                 if comp.ref == ref:
                     schematic_comp = comp
-                break
+                    break
 
         if schematic_comp is None:
             # Clear properties panel if component not found
@@ -1256,10 +1936,6 @@ class MainWindow(QMainWindow):
 
         # Update properties panel with component info
         self._update_properties_panel(schematic_comp)
-        
-        # Enable properties dialog button
-        if hasattr(self, "btn_properties_dialog"):
-            self.btn_properties_dialog.setEnabled(True)
 
     def _on_selection_cleared(self):
         """Handle when selection is cleared in schematic view."""
@@ -1278,9 +1954,8 @@ class MainWindow(QMainWindow):
         self.prop_value_edit.setEnabled(False)
         self.prop_value_edit.blockSignals(False)
         self.prop_nets_label.setText("—")
-        self.prop_extra_label.setText("—")
-        if hasattr(self, "btn_properties_dialog"):
-            self.btn_properties_dialog.setEnabled(False)
+        # Hide extra properties
+        self._hide_all_extra_fields()
     
     def _on_property_value_changed(self, new_value: float):
         """Handle property value changes from the properties panel."""
@@ -1300,6 +1975,10 @@ class MainWindow(QMainWindow):
         
         # Update the component value
         schematic_comp.value = new_value
+        
+        # For voltage and current sources, also update dc_level in extra
+        if schematic_comp.ctype == "V" or schematic_comp.ctype == "I":
+            schematic_comp.extra["dc_level"] = new_value
         
         # Update the schematic view to reflect the change
         if hasattr(self, "schematic_view"):
@@ -1361,14 +2040,8 @@ class MainWindow(QMainWindow):
         else:
             self.prop_nets_label.setText("No pins")
         
-        # Update extra parameters
-        if comp.extra:
-            extra_lines = []
-            for key, value in comp.extra.items():
-                extra_lines.append(f"{key}: {value}")
-            self.prop_extra_label.setText("<br>".join(extra_lines))
-        else:
-            self.prop_extra_label.setText("None")
+        # Show and populate extra properties fields
+        self._show_extra_fields_for_component(comp)
         
     def _on_edit_properties_from_panel(self):
         """Open properties dialog for the currently selected component."""
@@ -1406,8 +2079,8 @@ class MainWindow(QMainWindow):
             schematic_comp.extra["tolerance"] = properties.get("tolerance", 0.0)
             schematic_comp.extra["esr"] = properties.get("esr", 0.0)
         
-        elif schematic_comp.ctype == "OPAMP":
-            # Op-amp: model file, supply rails
+        elif schematic_comp.ctype == "OPAMP" or schematic_comp.ctype == "OPAMP_ideal":
+            # Op-amp: model file, subckt name, supply rails
             # Handle model_file: if None, remove it; otherwise set it
             if "model_file" in properties:
                 model_file = properties["model_file"]
@@ -1416,9 +2089,36 @@ class MainWindow(QMainWindow):
                 else:
                     # Explicitly cleared - remove it
                     schematic_comp.extra.pop("model_file", None)
-            # Supply rails are always set
-            schematic_comp.extra["vcc"] = properties.get("vcc", 15.0)
-            schematic_comp.extra["vee"] = properties.get("vee", -15.0)
+            # Handle subckt_name: if None, remove it; otherwise set it
+            if "subckt_name" in properties:
+                subckt_name = properties["subckt_name"]
+                if subckt_name:
+                    schematic_comp.extra["subckt_name"] = subckt_name
+                else:
+                    # Explicitly cleared - remove it
+                    schematic_comp.extra.pop("subckt_name", None)
+        
+        elif schematic_comp.ctype == "M" or schematic_comp.ctype == "M_bulk":
+            # MOSFET: model file, model name, mos_type
+            # Handle model_file: if None, remove it; otherwise set it
+            if "model_file" in properties:
+                model_file = properties["model_file"]
+                if model_file:
+                    schematic_comp.extra["model_file"] = model_file
+                else:
+                    # Explicitly cleared - remove it
+                    schematic_comp.extra.pop("model_file", None)
+            # Handle model: if None, remove it; otherwise set it
+            if "model" in properties:
+                model = properties["model"]
+                if model:
+                    schematic_comp.extra["model"] = model
+                else:
+                    # Explicitly cleared - remove it
+                    schematic_comp.extra.pop("model", None)
+            # mos_type is always set
+            if "mos_type" in properties:
+                schematic_comp.extra["mos_type"] = properties["mos_type"]
         
         elif schematic_comp.ctype == "V":
             # Voltage source: DC level, AC amplitude
@@ -1433,7 +2133,7 @@ class MainWindow(QMainWindow):
             elif "value" in properties:
                 schematic_comp.value = properties["value"]
         
-        # Update circuit if it exists (sync values)
+        # Update circuit if it exists (sync values and extra fields)
         if self.current_circuit:
             circuit_comp = None
             for comp in self.current_circuit.components:
@@ -1441,9 +2141,54 @@ class MainWindow(QMainWindow):
                     circuit_comp = comp
                     break
             
-            if circuit_comp and "value" in properties:
-                circuit_comp.value = properties["value"]
-                # Update schematic labels from circuit
+            if circuit_comp:
+                # Sync value
+                if "value" in properties:
+                    circuit_comp.value = properties["value"]
+                
+                # Sync extra fields based on component type
+                if schematic_comp.ctype == "OPAMP" or schematic_comp.ctype == "OPAMP_ideal":
+                    # Sync OPAMP extra fields
+                    if "model_file" in properties:
+                        model_file = properties["model_file"]
+                        if model_file:
+                            circuit_comp.extra["model_file"] = model_file
+                        else:
+                            circuit_comp.extra.pop("model_file", None)
+                    if "subckt_name" in properties:
+                        subckt_name = properties["subckt_name"]
+                        if subckt_name:
+                            circuit_comp.extra["subckt_name"] = subckt_name
+                        else:
+                            circuit_comp.extra.pop("subckt_name", None)
+                
+                elif schematic_comp.ctype == "M" or schematic_comp.ctype == "M_bulk":
+                    # Sync MOSFET extra fields
+                    if "model_file" in properties:
+                        model_file = properties["model_file"]
+                        if model_file:
+                            circuit_comp.extra["model_file"] = model_file
+                        else:
+                            circuit_comp.extra.pop("model_file", None)
+                    if "model" in properties:
+                        model = properties["model"]
+                        if model:
+                            circuit_comp.extra["model"] = model
+                        else:
+                            circuit_comp.extra.pop("model", None)
+                    if "mos_type" in properties:
+                        circuit_comp.extra["mos_type"] = properties["mos_type"]
+                
+                # Also sync other component types' extra fields if present
+                elif schematic_comp.ctype == "C":
+                    if "tolerance" in properties:
+                        circuit_comp.extra["tolerance"] = properties["tolerance"]
+                    if "esr" in properties:
+                        circuit_comp.extra["esr"] = properties["esr"]
+                elif schematic_comp.ctype == "V":
+                    if "ac_amplitude" in properties:
+                        circuit_comp.extra["ac_amplitude"] = properties["ac_amplitude"]
+        
         self._update_schematic_from_circuit(self.current_circuit)
 
         # Update properties panel and redraw schematic
