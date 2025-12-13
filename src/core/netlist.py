@@ -53,6 +53,19 @@ def _emit_opamp_block(lines: List[str], circuit: Circuit) -> None:
 
 
 
+def _needs_ngspice_pspice_compat(circuit: Circuit) -> bool:
+    """
+    Check if any component in the circuit requires ngspice PSpice compatibility mode.
+    
+    Returns:
+        True if ANY component has ngspice_pspice_compat set to True, False otherwise.
+    """
+    for comp in circuit.components:
+        if comp.extra.get("ngspice_pspice_compat", False):
+            return True
+    return False
+
+
 def _collect_model_files(circuit: Circuit) -> Set[str]:
     """
     Collect all unique model file paths from components that may use external model files.
@@ -188,7 +201,7 @@ def non_inverting_opamp_template() -> Circuit:
     return circuit
 
 
-def circuit_to_spice_netlist(circuit: Circuit) -> str:
+def circuit_to_spice_netlist(circuit: Circuit, ngspice_pspice_compat: bool = False) -> str:
     """
     Convert a Circuit object into a general SPICE netlist.
     
@@ -203,9 +216,19 @@ def circuit_to_spice_netlist(circuit: Circuit) -> str:
     - Current sources (I)
     - Voltage-controlled current sources (G)
     - Op-amps (OPAMP) - uses internal macromodel or vendor model
+    
+    Args:
+        circuit: Circuit to convert to netlist
+        ngspice_pspice_compat: If True, enables ngspice PSpice compatibility mode (.options ps)
     """
     lines: List[str] = [f"* Netlist for circuit: {circuit.name}"]
     lines.append("")
+    
+    # Add ngspice PSpice compatibility directive if needed
+    if ngspice_pspice_compat:
+        lines.append("* ngspice PSpice compatibility enabled")
+        lines.append(".options ps")
+        lines.append("")
 
     # Collect and emit model file includes
     model_files = _collect_model_files(circuit)
@@ -425,6 +448,7 @@ def build_general_ac_netlist(
     input_node: str = "Vin",
     output_node: str = "Vout",
     vsource_ref: str | None = None,
+    ngspice_pspice_compat: bool = False,
 ) -> str:
     """
     Build a general AC analysis netlist for any circuit topology.
@@ -435,9 +459,16 @@ def build_general_ac_netlist(
         input_node: Node name for input (will add AC source if not present)
         output_node: Node name for output (for measurement)
         vsource_ref: Optional reference of voltage source to use as AC input
+        ngspice_pspice_compat: If True, enables ngspice PSpice compatibility mode (.options ps)
     """
     lines: List[str] = [f"* AC analysis for circuit: {circuit.name}"]
     lines.append("")
+    
+    # Add ngspice PSpice compatibility directive if needed
+    if ngspice_pspice_compat:
+        lines.append("* ngspice PSpice compatibility enabled")
+        lines.append(".options ps")
+        lines.append("")
 
     # Collect and emit model file includes
     model_files = _collect_model_files(circuit)
@@ -606,6 +637,7 @@ def build_ac_sweep_netlist(
     output_node: str = "Vout",
     vsource_ref: str | None = None,
     sweep_type: str = "dec",
+    ngspice_pspice_compat: bool = False,
 ) -> str:
     """
     Build a general AC sweep netlist for any circuit topology.
@@ -619,9 +651,16 @@ def build_ac_sweep_netlist(
         output_node: Node name for output (for measurement)
         vsource_ref: Optional reference of voltage source to use as AC input
         sweep_type: Sweep type - "dec" for logarithmic (per decade) or "lin" for linear
+        ngspice_pspice_compat: If True, enables ngspice PSpice compatibility mode (.options ps)
     """
     lines = [f"* AC sweep for bandwidth - {circuit.name}"]
     lines.append("")
+    
+    # Add ngspice PSpice compatibility directive if needed
+    if ngspice_pspice_compat:
+        lines.append("* ngspice PSpice compatibility enabled")
+        lines.append(".options ps")
+        lines.append("")
 
     # Collect and emit model file includes
     model_files = _collect_model_files(circuit)
@@ -767,7 +806,7 @@ def build_ac_sweep_netlist(
     return "\n".join(lines)
 
 
-def build_dc_netlist(circuit: Circuit) -> str:
+def build_dc_netlist(circuit: Circuit, ngspice_pspice_compat: bool = False) -> str:
     """
     Build a DC analysis netlist for any circuit topology.
     
@@ -775,12 +814,19 @@ def build_dc_netlist(circuit: Circuit) -> str:
     
     Args:
         circuit: Circuit to simulate
+        ngspice_pspice_compat: If True, enables ngspice PSpice compatibility mode (.options ps)
         
     Returns:
         SPICE netlist string for DC analysis
     """
     lines: List[str] = [f"* DC analysis (operating point) for circuit: {circuit.name}"]
     lines.append("")
+    
+    # Add ngspice PSpice compatibility directive if needed
+    if ngspice_pspice_compat:
+        lines.append("* ngspice PSpice compatibility enabled")
+        lines.append(".options ps")
+        lines.append("")
 
     # Collect and emit model file includes
     model_files = _collect_model_files(circuit)
@@ -918,6 +964,7 @@ def build_noise_netlist(
     input_node: str = "Vin",
     output_node: str = "Vout",
     vsource_ref: str | None = None,
+    ngspice_pspice_compat: bool = False,
 ) -> str:
     """
     Build a general noise analysis netlist for any circuit topology.
@@ -930,9 +977,16 @@ def build_noise_netlist(
         input_node: Node name for input (will add AC source if not present)
         output_node: Node name for output (for measurement)
         vsource_ref: Optional reference of voltage source to use as AC input
+        ngspice_pspice_compat: If True, enables ngspice PSpice compatibility mode (.options ps)
     """
     lines = [f"* Noise analysis - {circuit.name}"]
     lines.append("")
+    
+    # Add ngspice PSpice compatibility directive if needed
+    if ngspice_pspice_compat:
+        lines.append("* ngspice PSpice compatibility enabled")
+        lines.append(".options ps")
+        lines.append("")
 
     # Collect and emit model file includes
     model_files = _collect_model_files(circuit)

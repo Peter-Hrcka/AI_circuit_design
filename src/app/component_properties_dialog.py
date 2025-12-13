@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QDialogButtonBox,
     QMessageBox,
+    QCheckBox,
 )
 
 from core.schematic_model import SchematicComponent
@@ -168,6 +169,12 @@ class ComponentPropertiesDialog(QDialog):
         form_layout.addRow("Subckt name:", subckt_layout)
         self.form_widgets["subckt_name"] = subckt_edit
         
+        # PSpice compatibility checkbox
+        pspice_compat_checkbox = QCheckBox("Enable PSpice compatibility for ngspice")
+        pspice_compat_checkbox.setToolTip("Enables ngspice PSpice/PS behavior mode for vendor models that use PSpice-like expressions.")
+        form_layout.addRow("", pspice_compat_checkbox)
+        self.form_widgets["ngspice_pspice_compat"] = pspice_compat_checkbox
+        
         group = QGroupBox("Op-Amp Properties")
         group.setLayout(form_layout)
         layout.addWidget(group)
@@ -307,6 +314,12 @@ class ComponentPropertiesDialog(QDialog):
         form_layout.addRow("SPICE Model:", model_layout)
         self.form_widgets["model"] = model_edit
         
+        # PSpice compatibility checkbox
+        pspice_compat_checkbox = QCheckBox("Enable PSpice compatibility for ngspice")
+        pspice_compat_checkbox.setToolTip("Enables ngspice PSpice/PS behavior mode for vendor models that use PSpice-like expressions.")
+        form_layout.addRow("", pspice_compat_checkbox)
+        self.form_widgets["ngspice_pspice_compat"] = pspice_compat_checkbox
+        
         group = QGroupBox("MOSFET Properties")
         group.setLayout(form_layout)
         layout.addWidget(group)
@@ -438,6 +451,8 @@ class ComponentPropertiesDialog(QDialog):
                 self.form_widgets["model_file"].setText(str(extra["model_file"]))
             if "subckt_name" in extra:
                 self.form_widgets["subckt_name"].setText(str(extra["subckt_name"]))
+            if "ngspice_pspice_compat" in self.form_widgets:
+                self.form_widgets["ngspice_pspice_compat"].setChecked(extra.get("ngspice_pspice_compat", False))
         
         elif self.component.ctype == "V":
             # Load voltage source properties
@@ -472,6 +487,8 @@ class ComponentPropertiesDialog(QDialog):
                 self.form_widgets["model_file"].setText(str(extra["model_file"]))
             if "model" in self.form_widgets and "model" in extra:
                 self.form_widgets["model"].setText(str(extra["model"]))
+            if "ngspice_pspice_compat" in self.form_widgets:
+                self.form_widgets["ngspice_pspice_compat"].setChecked(extra.get("ngspice_pspice_compat", False))
     
     def accept(self):
         """Collect values from form and store in result_properties."""
@@ -491,6 +508,8 @@ class ComponentPropertiesDialog(QDialog):
             self.result_properties["model_file"] = model_file if model_file else None
             subckt_name = self.form_widgets["subckt_name"].text().strip()
             self.result_properties["subckt_name"] = subckt_name if subckt_name else None
+            if "ngspice_pspice_compat" in self.form_widgets:
+                self.result_properties["ngspice_pspice_compat"] = self.form_widgets["ngspice_pspice_compat"].isChecked()
         
         elif self.component.ctype == "V":
             # Collect voltage source properties
@@ -540,6 +559,8 @@ class ComponentPropertiesDialog(QDialog):
                     self.result_properties["model"] = model_name
                 elif "model" in self.component.extra:
                     self.result_properties["model"] = None
+            if "ngspice_pspice_compat" in self.form_widgets:
+                self.result_properties["ngspice_pspice_compat"] = self.form_widgets["ngspice_pspice_compat"].isChecked()
         
         elif self.component.ctype == "G":
             # VCCS: value (transconductance) already handled above

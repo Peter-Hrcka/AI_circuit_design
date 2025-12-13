@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QSpinBox,
     QFormLayout,
+    QCheckBox,
 )
 from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QShortcut, QKeySequence, QAction, QIcon
@@ -69,6 +70,8 @@ from core.model_analyzer import analyze_model
 from core.model_conversion import maybe_convert_to_simple_opamp
 from core.model_metadata import ModelMetadata
 from core.simulator_manager import default_simulator_manager as sims
+from core.simulation_context import generate_simulation_context_banner
+from core.netlist import _needs_ngspice_pspice_compat
 from core.optimization import (
     optimize_gain_for_non_inverting_stage,
     optimize_gain_spice_loop,
@@ -284,6 +287,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.current_circuit = None  # will hold last simulated Circuit
         self.last_model_meta = None  # type: Optional[ModelMetadata]
+        self.last_model_meta_original = None  # type: Optional[ModelMetadata]  # Original before conversion
         self.last_freq_hz: float | None = None
         self.last_target_gain_db: float | None = None
         self.selected_component_ref = None  # Currently selected component for rotation
@@ -871,6 +875,15 @@ class MainWindow(QMainWindow):
         self.extra_row_indices["opamp_subckt"] = row_idx
         row_idx += 1
         
+        # PSpice compatibility checkbox for OPAMP
+        opamp_pspice_compat_checkbox = QCheckBox("Enable PSpice compatibility for ngspice")
+        opamp_pspice_compat_checkbox.setToolTip("For vendor models using PSpice-style expressions (IF/LIMIT/TABLE). Best-effort in ngspice; Xyce may still be preferred.")
+        self.extra_widgets["opamp_ngspice_pspice_compat"] = opamp_pspice_compat_checkbox
+        opamp_pspice_compat_checkbox.toggled.connect(self._on_extra_property_changed)
+        self.extra_form.addRow("", opamp_pspice_compat_checkbox)
+        self.extra_row_indices["opamp_ngspice_pspice_compat"] = row_idx
+        row_idx += 1
+        
         # MOSFET widgets
         # mos_type
         mosfet_mos_type_combo = QComboBox()
@@ -911,6 +924,15 @@ class MainWindow(QMainWindow):
         mosfet_model_auto.clicked.connect(lambda: self._auto_detect_mosfet_model())
         self.extra_form.addRow("SPICE Model:", mosfet_model_layout)
         self.extra_row_indices["mosfet_model"] = row_idx
+        row_idx += 1
+        
+        # PSpice compatibility checkbox for MOSFET
+        mosfet_pspice_compat_checkbox = QCheckBox("Enable PSpice compatibility for ngspice")
+        mosfet_pspice_compat_checkbox.setToolTip("For vendor models using PSpice-style expressions (IF/LIMIT/TABLE). Best-effort in ngspice; Xyce may still be preferred.")
+        self.extra_widgets["mosfet_ngspice_pspice_compat"] = mosfet_pspice_compat_checkbox
+        mosfet_pspice_compat_checkbox.toggled.connect(self._on_extra_property_changed)
+        self.extra_form.addRow("", mosfet_pspice_compat_checkbox)
+        self.extra_row_indices["mosfet_ngspice_pspice_compat"] = row_idx
         row_idx += 1
         
         # Voltage source widgets
@@ -1051,6 +1073,7 @@ class MainWindow(QMainWindow):
             # OPAMP fields
             show_row(self.extra_row_indices["opamp_model_file"])
             show_row(self.extra_row_indices["opamp_subckt"])
+            show_row(self.extra_row_indices["opamp_ngspice_pspice_compat"])
             
             # Enable widgets
             self.extra_widgets["opamp_model_file_edit"].setEnabled(True)
@@ -1058,6 +1081,7 @@ class MainWindow(QMainWindow):
             self.extra_widgets["opamp_model_file_clear"].setEnabled(True)
             self.extra_widgets["opamp_subckt_edit"].setEnabled(True)
             self.extra_widgets["opamp_subckt_auto"].setEnabled(True)
+            self.extra_widgets["opamp_ngspice_pspice_compat"].setEnabled(True)
             
             # Populate values (block signals to prevent updates during population)
             model_file = comp.extra.get("model_file", "")
@@ -1068,12 +1092,17 @@ class MainWindow(QMainWindow):
             self.extra_widgets["opamp_subckt_edit"].blockSignals(True)
             self.extra_widgets["opamp_subckt_edit"].setText(str(subckt_name))
             self.extra_widgets["opamp_subckt_edit"].blockSignals(False)
+            pspice_compat = comp.extra.get("ngspice_pspice_compat", False)
+            self.extra_widgets["opamp_ngspice_pspice_compat"].blockSignals(True)
+            self.extra_widgets["opamp_ngspice_pspice_compat"].setChecked(bool(pspice_compat))
+            self.extra_widgets["opamp_ngspice_pspice_compat"].blockSignals(False)
             
         elif comp.ctype == "M" or comp.ctype == "M_bulk":
             # MOSFET fields
             show_row(self.extra_row_indices["mosfet_mos_type"])
             show_row(self.extra_row_indices["mosfet_model_file"])
             show_row(self.extra_row_indices["mosfet_model"])
+            show_row(self.extra_row_indices["mosfet_ngspice_pspice_compat"])
             
             # Enable widgets
             self.extra_widgets["mosfet_mos_type"].setEnabled(True)
@@ -1082,6 +1111,7 @@ class MainWindow(QMainWindow):
             self.extra_widgets["mosfet_model_file_clear"].setEnabled(True)
             self.extra_widgets["mosfet_model"].setEnabled(True)
             self.extra_widgets["mosfet_model_auto"].setEnabled(True)
+            self.extra_widgets["mosfet_ngspice_pspice_compat"].setEnabled(True)
             
             # Populate values (block signals to prevent updates during population)
             mos_type = comp.extra.get("mos_type", "NMOS")
@@ -1096,6 +1126,10 @@ class MainWindow(QMainWindow):
             self.extra_widgets["mosfet_model"].blockSignals(True)
             self.extra_widgets["mosfet_model"].setText(str(model))
             self.extra_widgets["mosfet_model"].blockSignals(False)
+            pspice_compat = comp.extra.get("ngspice_pspice_compat", False)
+            self.extra_widgets["mosfet_ngspice_pspice_compat"].blockSignals(True)
+            self.extra_widgets["mosfet_ngspice_pspice_compat"].setChecked(bool(pspice_compat))
+            self.extra_widgets["mosfet_ngspice_pspice_compat"].blockSignals(False)
             
         elif comp.ctype == "V":
             # Voltage source fields
@@ -1309,6 +1343,39 @@ class MainWindow(QMainWindow):
         """Append a line to the output box."""
         self.output.append(text)
     
+    def _log_simulation_context(
+        self,
+        circuit,
+        meta_original: Optional[ModelMetadata] = None,
+        meta_converted: Optional[ModelMetadata] = None,
+    ) -> None:
+        """
+        Log simulation context banner.
+        
+        Args:
+            circuit: Circuit object
+            meta_original: Original model metadata (before conversion)
+            meta_converted: Converted model metadata (after conversion, if any)
+        """
+        if circuit is None:
+            return
+        
+        # Get simulation context from simulator manager
+        simulator_name, conversion_used, run_mode, ngspice_pspice_compat = sims.get_simulation_context(
+            meta_original, meta_converted, circuit
+        )
+        
+        # Generate and log banner
+        banner = generate_simulation_context_banner(
+            simulator_name=simulator_name,
+            conversion_used=conversion_used,
+            run_mode=run_mode,
+            ngspice_pspice_compat=ngspice_pspice_compat,
+            meta_original=meta_original,
+            meta_converted=meta_converted,
+        )
+        self.log(banner)
+    
     def _clear_opamp_model_file(self):
         """Clear OPAMP model file."""
         self.extra_widgets["opamp_model_file_edit"].clear()
@@ -1432,6 +1499,10 @@ class MainWindow(QMainWindow):
             else:
                 schematic_comp.extra.pop("subckt_name", None)
             
+            # PSpice compatibility checkbox
+            pspice_compat = self.extra_widgets["opamp_ngspice_pspice_compat"].isChecked()
+            schematic_comp.extra["ngspice_pspice_compat"] = bool(pspice_compat)
+            
         elif schematic_comp.ctype == "M" or schematic_comp.ctype == "M_bulk":
             # MOSFET properties
             schematic_comp.extra["mos_type"] = self.extra_widgets["mosfet_mos_type"].currentText()
@@ -1496,6 +1567,10 @@ class MainWindow(QMainWindow):
                         circuit_comp.extra["subckt_name"] = schematic_comp.extra["subckt_name"]
                     else:
                         circuit_comp.extra.pop("subckt_name", None)
+                    if "ngspice_pspice_compat" in schematic_comp.extra:
+                        circuit_comp.extra["ngspice_pspice_compat"] = schematic_comp.extra["ngspice_pspice_compat"]
+                    else:
+                        circuit_comp.extra.pop("ngspice_pspice_compat", None)
                 elif schematic_comp.ctype == "M" or schematic_comp.ctype == "M_bulk":
                     circuit_comp.extra["mos_type"] = schematic_comp.extra.get("mos_type", "NMOS")
                     if "model_file" in schematic_comp.extra:
@@ -1506,6 +1581,10 @@ class MainWindow(QMainWindow):
                         circuit_comp.extra["model"] = schematic_comp.extra["model"]
                     else:
                         circuit_comp.extra.pop("model", None)
+                    if "ngspice_pspice_compat" in schematic_comp.extra:
+                        circuit_comp.extra["ngspice_pspice_compat"] = schematic_comp.extra["ngspice_pspice_compat"]
+                    else:
+                        circuit_comp.extra.pop("ngspice_pspice_compat", None)
                 elif schematic_comp.ctype == "V":
                     circuit_comp.extra["dc_level"] = schematic_comp.extra.get("dc_level", 0.0)
                     circuit_comp.extra["ac_amplitude"] = schematic_comp.extra.get("ac_amplitude", 0.0)
@@ -1702,6 +1781,8 @@ class MainWindow(QMainWindow):
             self.log("No conversion applied (model is standard SPICE or auto-conversion disabled).")
             self.log("")
 
+        # Store both original and converted metadata
+        self.last_model_meta_original = meta_orig
         return meta_conv
 
     # --------------------------------------------------------------------- #
@@ -1869,8 +1950,12 @@ class MainWindow(QMainWindow):
 
         # 5) Bandwidth via AC sweep
         self.log("Running AC sweep for bandwidth...")
-        ac_net = build_ac_sweep_netlist(final_circuit)
-        ac_res = sims.run_ac_sweep(ac_net, meta_model)
+        # Log simulation context
+        self._log_simulation_context(final_circuit, self.last_model_meta_original, meta_model)
+        # Get PSpice compatibility flag
+        pspice_compat = _needs_ngspice_pspice_compat(final_circuit)
+        ac_net = build_ac_sweep_netlist(final_circuit, ngspice_pspice_compat=pspice_compat)
+        ac_res = sims.run_ac_sweep(ac_net, meta_model, circuit=final_circuit)
         bw = find_3db_bandwidth(ac_res["freq_hz"], ac_res["gain_db"])
         if bw is None:
             self.log("Bandwidth (-3 dB): > sweep range (no rolloff found)")
@@ -2097,6 +2182,11 @@ class MainWindow(QMainWindow):
                 else:
                     # Explicitly cleared - remove it
                     schematic_comp.extra.pop("subckt_name", None)
+            # Handle ngspice_pspice_compat
+            if "ngspice_pspice_compat" in properties:
+                schematic_comp.extra["ngspice_pspice_compat"] = properties["ngspice_pspice_compat"]
+            else:
+                schematic_comp.extra.pop("ngspice_pspice_compat", None)
         
         elif schematic_comp.ctype == "M" or schematic_comp.ctype == "M_bulk":
             # MOSFET: model file, model name, mos_type
@@ -2119,6 +2209,11 @@ class MainWindow(QMainWindow):
             # mos_type is always set
             if "mos_type" in properties:
                 schematic_comp.extra["mos_type"] = properties["mos_type"]
+            # Handle ngspice_pspice_compat from dialog
+            if "ngspice_pspice_compat" in properties:
+                schematic_comp.extra["ngspice_pspice_compat"] = properties["ngspice_pspice_compat"]
+            else:
+                schematic_comp.extra.pop("ngspice_pspice_compat", None)
         
         elif schematic_comp.ctype == "V":
             # Voltage source: DC level, AC amplitude
@@ -2303,8 +2398,11 @@ class MainWindow(QMainWindow):
         if meta_model is not None:  # Only if we have a model
             self.log("")
             self.log("Running AC sweep for bandwidth (current schematic)...")
-            ac_net = build_ac_sweep_netlist(circuit, vsource_ref=vsource_ref)
-            ac_res = sims.run_ac_sweep(ac_net, meta_model)
+            # Log simulation context
+            self._log_simulation_context(circuit, self.last_model_meta_original, meta_model)
+            pspice_compat = _needs_ngspice_pspice_compat(circuit)
+            ac_net = build_ac_sweep_netlist(circuit, vsource_ref=vsource_ref, ngspice_pspice_compat=pspice_compat)
+            ac_res = sims.run_ac_sweep(ac_net, meta_model, circuit=circuit)
             bw = find_3db_bandwidth(ac_res["freq_hz"], ac_res["gain_db"])
         else:
             bw = None
@@ -2546,8 +2644,11 @@ class MainWindow(QMainWindow):
         # Optional: AC sweep with these values
         self.log("")
         self.log("Running AC sweep for bandwidth (schematic circuit).")
-        ac_net = build_ac_sweep_netlist(circuit, vsource_ref=vsource_ref)
-        ac_res = sims.run_ac_sweep(ac_net, meta_model)
+        # Log simulation context
+        self._log_simulation_context(circuit, self.last_model_meta_original, meta_model)
+        pspice_compat = _needs_ngspice_pspice_compat(circuit)
+        ac_net = build_ac_sweep_netlist(circuit, vsource_ref=vsource_ref, ngspice_pspice_compat=pspice_compat)
+        ac_res = sims.run_ac_sweep(ac_net, meta_model, circuit=circuit)
         bw = find_3db_bandwidth(ac_res["freq_hz"], ac_res["gain_db"])
         if bw is None:
             self.log("Bandwidth (-3 dB): > sweep range (no rolloff found)")
@@ -2588,7 +2689,12 @@ class MainWindow(QMainWindow):
         
         # Build DC netlist
         try:
-            dc_netlist = build_dc_netlist(circuit)
+            # Get model metadata (use stored or None for built-in)
+            meta_model = self.last_model_meta
+            # Log simulation context
+            self._log_simulation_context(circuit, self.last_model_meta_original, meta_model)
+            pspice_compat = _needs_ngspice_pspice_compat(circuit)
+            dc_netlist = build_dc_netlist(circuit, ngspice_pspice_compat=pspice_compat)
         except Exception as exc:
             QMessageBox.critical(
                 self,
@@ -2599,9 +2705,7 @@ class MainWindow(QMainWindow):
         
         # Run DC analysis
         try:
-            # Get model metadata (use stored or None for built-in)
-            meta_model = self.last_model_meta
-            nodal_voltages = sims.run_dc_analysis(dc_netlist, meta_model)
+            nodal_voltages = sims.run_dc_analysis(dc_netlist, meta_model, circuit=circuit)
         except Exception as exc:
             QMessageBox.critical(
                 self,
@@ -2765,6 +2869,9 @@ class MainWindow(QMainWindow):
                 f"{points} points, type={sweep_type}."
             )
             
+            # Log simulation context
+            self._log_simulation_context(circuit, self.last_model_meta_original, meta_model)
+            pspice_compat = _needs_ngspice_pspice_compat(circuit)
             ac_net = build_ac_sweep_netlist(
                 circuit,
                 f_start=f_start,
@@ -2772,8 +2879,9 @@ class MainWindow(QMainWindow):
                 points=points,
                 vsource_ref=vsource_ref,
                 sweep_type=sweep_type,
+                ngspice_pspice_compat=pspice_compat,
             )
-            ac_res = sims.run_ac_sweep(ac_net, meta_model)
+            ac_res = sims.run_ac_sweep(ac_net, meta_model, circuit=circuit)
             freq = ac_res["freq_hz"]
             gain_db_sweep = ac_res["gain_db"]
             
